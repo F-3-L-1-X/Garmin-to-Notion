@@ -12,21 +12,22 @@ Les autres synchronisations du projet source (records personnels, pas et sommeil
 
 1. Créer une intégration dans [Notion My integrations](https://www.notion.so/profile/integrations), copier son secret API, puis connecter cette intégration à la base « Journal d'entraînement » via le menu **••• → Connexions** de la base.
 2. Dans ce dépôt GitHub, ouvrir **Settings → Secrets and variables → Actions → New repository secret** et ajouter :
-   - `NOTION_TOKEN` : le secret de l'intégration Notion ;
+   - `NOTION_TOKEN` : le secret de l'intégration Notion, sans le préfixe `Bearer ` ;
    - `NOTION_DB_ID` : `2da53733bea98160bdcae88a07aea5eb` ;
    - `GARMIN_AUTH_TOKEN` : à créer à l'étape ci-dessous.
-3. Installer `uv` sur Windows avec PowerShell : `winget install --id=astral-sh.uv -e`, puis fermer et rouvrir PowerShell.
-4. Dans PowerShell, lancer :
+3. Si la base contient plusieurs sources de données, ajouter aussi le secret `NOTION_DATA_SOURCE_ID` avec l'ID de la source utilisée pour les séances. Pour trouver cet ID, ouvrir la base dans Notion, puis **••• → Gérer les sources de données → Copier l'ID de la source**. Si la base n'a qu'une seule source, ce secret est inutile.
+4. Installer `uv` sur Windows avec PowerShell : `winget install --id=astral-sh.uv -e`, puis fermer et rouvrir PowerShell.
+5. Dans PowerShell, lancer :
    ```powershell
    uv run https://raw.githubusercontent.com/F-3-L-1-X/Garmin-to-Notion/main/scripts/generate-garmin-token.py
    ```
    Saisir les identifiants Garmin et le code de double authentification uniquement dans cette fenêtre locale. Copier tout le JSON affiché et le sauvegarder comme secret GitHub `GARMIN_AUTH_TOKEN`. Ne jamais publier ce JSON.
-5. Dans GitHub, ouvrir **Actions → Sync Garmin to Notion → Run workflow** pour le premier lancement. Ensuite la synchronisation est quotidienne.
+6. Dans GitHub, ouvrir **Actions → Sync Garmin to Notion → Run workflow** pour le premier lancement. Ensuite la synchronisation est quotidienne.
 
 Les champs subjectifs (qualité, douleur, charge mentale, énergie après 24 h), le matériel, le lieu et la météo restent à renseigner dans Notion. Les champs que Garmin ne fournit pas pour une activité sont laissés tels quels.
 
 ## Lancer depuis son ordinateur
 
-Après avoir cloné ce dépôt et installé uv : `uv sync`, puis définir les trois variables d'environnement listées ci-dessus et lancer `uv run python -m src.workflows.garmin-activities`.
+Après avoir cloné ce dépôt et installé uv : `uv sync`, puis définir les variables d'environnement listées ci-dessus et lancer `uv run python -m src.workflows.garmin-activities`.
 
 Licence : MIT. Le code source original conserve son attribution dans [LICENSE](LICENSE).
