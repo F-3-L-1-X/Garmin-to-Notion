@@ -158,7 +158,7 @@ def upcoming_pages(
 def _text_from_block(block: dict[str, Any]) -> str:
     block_type = block.get("type")
     body = block.get(block_type, {}) if block_type else {}
-    runs = body.get("rich_text") or body.get("title") or []
+    runs = body.get("rich_text") or body.get("title") or body.get("caption") or []
     if runs:
         return "".join(run.get("plain_text", "") for run in runs)
     cells = body.get("cells")
@@ -209,10 +209,26 @@ def page_disciplines(page: dict[str, Any]) -> list[str]:
 
 
 def page_source_lines(page: dict[str, Any]) -> list[str]:
-    value = page.get("properties", {}).get("Source", {})
-    runs = value.get("rich_text") or value.get("title") or []
-    source = "".join(item.get("plain_text", "") for item in runs)
-    return [line.strip() for line in source.splitlines() if line.strip()]
+    lines: list[str] = []
+    properties = page.get("properties", {})
+    for name, value in properties.items():
+        if name == TITLE_PROPERTY:
+            continue
+        runs = value.get("rich_text") or []
+        if runs:
+            text = "".join(item.get("plain_text", "") for item in runs).strip()
+            if text:
+                lines.append(f"{name} : {text}")
+            continue
+        selected = value.get("select") or value.get("status")
+        if selected and selected.get("name"):
+            lines.append(f"{name} : {selected['name']}")
+            continue
+        choices = value.get("multi_select") or []
+        names = [item.get("name", "").strip() for item in choices if item.get("name")]
+        if names:
+            lines.append(f"{name} : {', '.join(names)}")
+    return lines
 
 
 def sport_for_disciplines(disciplines: list[str]) -> dict[str, Any] | None:
@@ -470,7 +486,7 @@ def _time_segment(
     return {
         "duration_seconds": _duration_seconds(match),
         "kind": _step_kind(label, sport_key),
-        "description": label or "Étape",
+        "description": full_line.strip() or label or "Étape",
     }
 
 
@@ -627,6 +643,24 @@ def _numbered_routine_steps(lines: list[str]) -> list[dict[str, Any]]:
     return steps
 
 
+def _split_text_chunks(value: str, limit: int = 450) -> list[str]:
+    remaining = value
+    chunks: list[str] = []
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        split_at = max(remaining.rfind("\n", 0, limit), remaining.rfind(" ", 0, limit))
+        if split_at < limit // 2:
+            split_at = limit
+            chunks.append(remaining[:split_at])
+            remaining = remaining[split_at:]
+        else:
+            chunks.append(remaining[:split_at + 1])
+            remaining = remaining[split_at + 1:]
+    return chunks
+
+
 def _generic_prompt_steps(lines: list[str]) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
     for raw_line in lines:
@@ -640,7 +674,9 @@ def _generic_prompt_steps(lines: list[str]) -> list[dict[str, Any]]:
             continue
         match = DURATION_TOKEN.search(line)
         duration = _duration_seconds(match) if match else None
-        steps.append(_time_or_manual_step(len(steps) + 1, line, duration))
+        for index, chunk in enumerate(_split_text_chunks(line), start=1):
+            chunk_duration = duration if index == 1 else None
+            steps.append(_time_or_manual_step(len(steps) + 1, chunk, chunk_duration))
     return steps
 
 
@@ -652,6 +688,22 @@ def _estimated_seconds(steps: list[dict[str, Any]]) -> int:
         elif step.get("endCondition", {}).get("conditionTypeKey") == "time":
             total += int(step.get("endConditionValue") or 0)
     return total
+
+
+def _append_text_overflow_steps(
+    steps: list[dict[str, Any]],
+    complete_text: str,
+    description_limit: int = 1000,
+) -> None:
+    overflow = complete_text[description_limit:]
+    if not overflow:
+        return
+    chunks = _split_text_chunks(overflow, limit=450)
+    first_order = max((int(step.get("stepOrder", 0)) for step in steps), default=0) + 1
+    total = len(chunks)
+    for index, chunk in enumerate(chunks, start=1):
+        description = f"Suite du texte Notion ({index}/{total}) : {chunk}"
+        steps.append(_time_or_manual_step(first_order + index - 1, description))
 
 
 def _generic_workout(
@@ -669,6 +721,16 @@ def _generic_workout(
         (title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
     ).hexdigest()[:HASH_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
+    full_description = (
+        f"Séance Notion : {title}\nDiscipline : {discipline_text}\n\n{source_text.strip()}"
+    ).strip()
+    if not source_text.strip():
+        full_description = (
+            f"Créé automatiquement depuis la séance Notion « {title} ». "
+            "Les étapes sans durée attendent une validation manuelle."
+        )
+    _append_text_overflow_steps(steps, full_description)
+
     workout = {
         "workoutName": f"{title[:48].rstrip()} {marker}"[:100],
         "sportType": dict(sport_type),
@@ -678,10 +740,7 @@ def _generic_workout(
             "sportType": dict(sport_type),
             "workoutSteps": steps,
         }],
-        "description": (
-            f"Créé automatiquement depuis la séance Notion « {title} » "
-            f"(discipline : {discipline_text}). Les étapes sans durée attendent une validation manuelle."
-        )[:1000],
+        "description": full_description[:1000],
     }
     return workout, marker
 
@@ -707,7 +766,10 @@ def build_garmin_workout(
             return _build_strength_workout(
                 title, page_id, sections, discipline_text + "\n" + source_text
             )
-        raise ValueError("Aucun atelier de renforcement exploitable n'a été trouvé.")
+        steps = _generic_prompt_steps(lines + source_lines)
+        return _generic_workout(
+            title, page_id, discipline_text, source_text, sport_type, steps
+        )
 
     if sport_key in {"running", "cycling"}:
         if sport_key == "cycling" and any(
@@ -720,8 +782,12 @@ def build_garmin_workout(
                 "Précise le nombre, par exemple 4x (5 min effort / 2 min récupération)."
             )
         steps = _parse_cardio_steps(plan_lines, sport_key)
+        if not steps:
+            steps = _generic_prompt_steps(plan_lines)
     elif sport_key == "swimming":
         steps = _parse_swim_steps(plan_lines)
+        if not steps:
+            steps = _generic_prompt_steps(plan_lines)
     else:
         steps = _numbered_routine_steps(lines)
         if not steps:
@@ -770,8 +836,9 @@ def _exercise_step(
     note = f" · {section['notes']}" if section.get("notes") else ""
     emom = " · EMOM : un tour au début de chaque minute" if "emom" in section["title"].casefold() else ""
     match_note = "" if exact_match else " · nom d'exercice Garmin générique"
+    exercise_instruction = f"{item['reps']} x {item['name']}{reference}"
     description = (
-        f"{section['title']} · {item['name']}{reference}{note}{emom}{match_note}"
+        f"{section['title']} · {exercise_instruction}{note}{emom}{match_note}"
     )
     return {
         "type": "ExecutableStepDTO",
@@ -892,6 +959,12 @@ def _build_strength_workout(
                 f"{section['title']}: la montre compte les tours, mais ne déclenche pas "
                 "un départ automatique toutes les minutes."
             )
+    full_description = (
+        f"Séance Notion : {title}\n\n{source_text.strip()}\n\n"
+        + " ".join(note_parts)
+    ).strip()
+    _append_text_overflow_steps(steps, full_description)
+
     workout = {
         "workoutName": workout_name,
         "sportType": {
@@ -911,7 +984,7 @@ def _build_strength_workout(
                 "workoutSteps": steps,
             }
         ],
-        "description": " ".join(note_parts)[:1000],
+        "description": full_description[:1000],
     }
     return workout, marker
 
