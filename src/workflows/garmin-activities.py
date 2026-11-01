@@ -127,6 +127,9 @@ def activity_properties(activity: dict) -> dict:
         "Durée (min)": as_number(activity.get("duration"), divisor=60, digits=1),
         "FC moyenne (bmp)": as_number(activity.get("averageHR"), digits=0),
         "FC maximum (pbm)": as_number(activity.get("maxHR"), digits=0),
+        "Charge d'exercice": as_number(
+            activity.get("activityTrainingLoad") or activity.get("trainingLoad"), digits=1
+        ),
         "Aérobie": as_number(activity.get("aerobicTrainingEffect"), digits=1),
         "Anéorobie ": as_number(activity.get("anaerobicTrainingEffect"), digits=1),
         "Watts moyenne": as_number(activity.get("avgPower"), digits=0),
