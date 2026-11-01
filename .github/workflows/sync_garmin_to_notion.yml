@@ -1,0 +1,27 @@
+name: Sync Garmin to Notion
+
+on:
+  schedule:
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      GARMIN_ACTIVITIES_FETCH_LIMIT:
+        type: number
+        default: 10
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync
+      - name: Synchroniser les activités Garmin
+        env:
+          GARMIN_AUTH_TOKEN: ${{ secrets.GARMIN_AUTH_TOKEN }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+          GARMIN_ACTIVITIES_FETCH_LIMIT: ${{ inputs.GARMIN_ACTIVITIES_FETCH_LIMIT || '10' }}
+        run: uv run python -m src.workflows.garmin-activities
