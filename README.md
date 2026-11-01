@@ -51,7 +51,7 @@ Le nom de chaque entraînement contient un identifiant de la page Notion pour é
    uv run https://raw.githubusercontent.com/F-3-L-1-X/Garmin-to-Notion/main/scripts/generate-garmin-token.py
    ```
    Saisir les identifiants Garmin et le code de double authentification uniquement dans cette fenêtre locale. Copier tout le JSON affiché et le sauvegarder comme secret GitHub `GARMIN_AUTH_TOKEN`. Ne jamais publier ce JSON.
-6. Pour le premier essai, ouvrir **Actions → Sync Garmin to Notion → Run workflow** et choisir une limite de `1` activité. Vérifier la page correspondante dans Notion. Ensuite, le contrôle automatique a lieu toutes les 15 minutes ; tu peux aussi lancer le workflow manuellement après une séance.
+6. Pour tester seulement l'envoi d'un entraînement, ouvrir **Actions → Sync Garmin to Notion → Run workflow**, décocher **SYNC_ACTIVITIES**, puis lancer le workflow. Dans le journal, vérifier l'étape « Envoyer les entraînements prévus sur la montre ». Pour tester aussi l'import d'activités, laisser **SYNC_ACTIVITIES** coché et choisir une limite de `1` activité. Ensuite, le contrôle automatique a lieu toutes les 15 minutes ; tu peux aussi lancer le workflow manuellement après une séance.
 
 Les champs subjectifs (qualité, douleur, charge mentale, énergie après 24 h), le matériel, le lieu et la météo restent à renseigner dans Notion. Les champs que Garmin ne fournit pas pour une activité sont laissés tels quels.
 
