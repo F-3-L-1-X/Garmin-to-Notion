@@ -714,8 +714,6 @@ def _generic_workout(
     sport_type: dict[str, Any],
     steps: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], str]:
-    if not steps:
-        raise ValueError("Aucune consigne exploitable dans cette séance.")
     page_marker = page_id.replace("-", "").casefold()[:PAGE_MARKER_LENGTH]
     digest = hashlib.sha256(
         (title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
@@ -729,6 +727,13 @@ def _generic_workout(
             f"Créé automatiquement depuis la séance Notion « {title} ». "
             "Les étapes sans durée attendent une validation manuelle."
         )
+    if not steps:
+        for raw_line in source_text.splitlines():
+            line = raw_line.strip()
+            for chunk in _split_text_chunks(line):
+                steps.append(_time_or_manual_step(len(steps) + 1, chunk))
+    if not steps:
+        raise ValueError("Aucune consigne exploitable dans cette séance.")
     _append_text_overflow_steps(steps, full_description)
 
     workout = {
