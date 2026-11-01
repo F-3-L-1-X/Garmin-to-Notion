@@ -2,10 +2,15 @@ import os
 from datetime import UTC, datetime, timedelta
 
 from dotenv import load_dotenv
-from garminconnect import Garmin as GarminClient
+from garminconnect import Garmin as GarminClient, parse_activity_detail_metrics
 from notion_client import Client as NotionClient
 
 from src.helpers import get_garmin_client, get_notion_client
+from src.helpers.garmin_report import (
+    add_or_update_activity_report,
+    find_activity_report_page,
+    render_activity_report,
+)
 
 DATE_PROPERTY = "Date de la  séance"
 TITLE_PROPERTY = "Nom"
@@ -212,7 +217,7 @@ def create_activity(
     activity: dict,
     activity_name: str,
     discipline: str | None,
-) -> None:
+) -> dict:
     properties = activity_properties(activity)
     properties["Source"] = {
         "rich_text": [{"text": {"content": "Garmin Connect"}}]
@@ -223,7 +228,7 @@ def create_activity(
     properties[DATE_PROPERTY] = {"date": {"start": start_date(activity)}}
     if discipline:
         properties["Discipline"] = {"multi_select": [{"name": discipline}]}
-    notion.pages.create(
+    return notion.pages.create(
         parent={"type": "data_source_id", "data_source_id": data_source_id},
         properties=properties,
     )
@@ -242,6 +247,17 @@ def update_planned_session(
     )
 
 
+def _optional_activity_data(garmin: GarminClient, method_name: str, activity_id: str):
+    method = getattr(garmin, method_name, None)
+    if method is None:
+        return []
+    try:
+        return method(activity_id)
+    except Exception as error:
+        print(f"Donnée Garmin facultative indisponible ({method_name}) : {error}")
+        return []
+
+
 def main():
     load_dotenv()
     garmin, configuration = get_garmin_client()
@@ -256,6 +272,20 @@ def main():
         type_key = (activity.get("activityType") or {}).get("typeKey", "")
         discipline = discipline_for(type_key)
         day = activity_day(activity)
+        activity_id = str(activity.get("activityId") or "")
+
+        already_reported = None
+        if activity_id:
+            already_reported = find_activity_report_page(
+                notion,
+                activities_data_source_id,
+                day,
+                activity_id,
+            )
+        if already_reported:
+            print(f"Bilan Garmin déjà présent : {_page_title(already_reported)}")
+            continue
+
         planned = find_planned_session(
             notion,
             activities_data_source_id,
@@ -264,11 +294,48 @@ def main():
             discipline,
         )
         if planned:
+            page = planned
             update_planned_session(notion, planned, activity)
             print(f"Séance planifiée mise à jour : {_page_title(planned)}")
         else:
-            create_activity(notion, activities_data_source_id, activity, name, discipline)
+            page = create_activity(notion, activities_data_source_id, activity, name, discipline)
             print(f"Nouvelle activité ajoutée : {name}")
+
+        if not activity_id:
+            print("Bilan graphique ignoré : Garmin n'a pas fourni l'identifiant de l'activité.")
+            continue
+
+        try:
+            details = garmin.get_activity_details(activity_id)
+            samples = parse_activity_detail_metrics(details) or []
+        except Exception as error:
+            print(f"Impossible de lire les courbes Garmin de « {name} » : {error}")
+            continue
+
+        heart_rate_zones = _optional_activity_data(
+            garmin,
+            "get_activity_hr_in_timezones",
+            activity_id,
+        )
+        power_zones = _optional_activity_data(
+            garmin,
+            "get_activity_power_in_timezones",
+            activity_id,
+        )
+        report = render_activity_report(
+            name,
+            activity,
+            samples,
+            heart_rate_zones,
+            power_zones,
+            discipline,
+        )
+        if report is None:
+            print(f"Pas de courbe Garmin exploitable pour « {name} » ; bilan non ajouté.")
+            continue
+
+        add_or_update_activity_report(notion, page["id"], activity_id, report)
+        print(f"Bilan graphique ajouté dans Notion : {name}")
 
 
 if __name__ == "__main__":
