@@ -4,7 +4,7 @@ Ce dépôt reprend le projet [garmin-to-notion de chloevoyer](https://github.com
 
 ## Ce qui est synchronisé
 
-Une fois configuré, GitHub Actions importe les activités Garmin chaque jour et peut aussi être lancé manuellement. Pour chaque activité terminée, le script cherche la séance prévue à la même date : d'abord avec le même nom, puis avec la même discipline si une seule séance correspond. Il met à jour cette ligne avec les mesures fournies par Garmin et coche « Terminé », en conservant les informations prévues et les notes personnelles. Si aucune séance correspondante n'est trouvée, il crée une nouvelle ligne. Les mesures importées peuvent inclure la distance, la durée, la fréquence cardiaque, les effets d'entraînement, la vitesse, les watts, la respiration et le dénivelé.
+Une fois configuré, GitHub Actions importe les activités Garmin chaque jour et peut aussi être lancé manuellement. Pour chaque activité terminée, le script cherche la séance prévue à la même date : d'abord avec le même nom, puis avec la même discipline si une seule séance correspond. Il met à jour cette ligne avec les mesures fournies par Garmin et coche « Terminé », en conservant les informations prévues et les notes personnelles. Si aucune séance correspondante n'est trouvée, il crée une nouvelle ligne. Les mesures importées peuvent inclure la distance, la durée, la fréquence cardiaque, la charge d'exercice, les effets d'entraînement, la vitesse, les watts, la respiration et le dénivelé.
 
 Les autres synchronisations du projet source (records personnels, pas et sommeil) ne sont pas lancées car elles nécessitent des bases Notion séparées.
 
