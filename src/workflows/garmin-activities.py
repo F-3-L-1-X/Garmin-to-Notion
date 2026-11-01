@@ -156,9 +156,6 @@ def activity_properties(activity: dict) -> dict:
         properties["Dénivelé +"] = {
             "rich_text": [{"text": {"content": str(elevation_gain)}}]
         }
-    properties["Source"] = {
-        "rich_text": [{"text": {"content": "Garmin Connect"}}]
-    }
     properties["Terminé"] = {"checkbox": True}
     return properties
 
@@ -171,6 +168,9 @@ def create_activity(
     discipline: str | None,
 ) -> None:
     properties = activity_properties(activity)
+    properties["Source"] = {
+        "rich_text": [{"text": {"content": "Garmin Connect"}}]
+    }
     properties[TITLE_PROPERTY] = {
         "title": [{"text": {"content": activity_name[:2000]}}]
     }
