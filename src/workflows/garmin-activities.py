@@ -105,15 +105,12 @@ def main():
     notion, databases = get_notion_client()
     for activity in get_all_activities(garmin, configuration.activity_fetch_limit):
         name = activity.get("activityName") or "Activité Garmin"
-        try:
-            date_iso = start_date(activity)
-            if not exists(notion, databases.activities, date_iso, name):
-                create_activity(notion, databases.activities, activity)
-                print(f"Ajoutée : {name}")
-            else:
-                print(f"Déjà présente : {name}")
-        except Exception as error:
-            print(f"Activité ignorée ({name}) : {error}")
+        date_iso = start_date(activity)
+        if not exists(notion, databases.activities, date_iso, name):
+            create_activity(notion, databases.activities, activity)
+            print(f"Ajoutée : {name}")
+        else:
+            print(f"Déjà présente : {name}")
 
 
 if __name__ == "__main__":
