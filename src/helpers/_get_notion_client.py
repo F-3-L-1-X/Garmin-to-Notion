@@ -21,7 +21,13 @@ def get_notion_client() -> tuple[Client, NotionDatabases]:
         daily_steps=os.getenv("NOTION_STEPS_DB_ID"),
     )
 
-    notion_token = os.getenv("NOTION_TOKEN")
+    notion_token = (os.getenv("NOTION_TOKEN") or "").strip()
+    if not notion_token:
+        raise ValueError("NOTION_TOKEN is required.")
+    if notion_token.lower().startswith("bearer "):
+        raise ValueError(
+            "Set NOTION_TOKEN to the raw Notion token only; do not include 'Bearer '."
+        )
     notion_client = Client(auth=notion_token)
 
     print("Notion client initialized.")
