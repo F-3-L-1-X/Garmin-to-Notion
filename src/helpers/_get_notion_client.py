@@ -3,6 +3,9 @@ from dataclasses import dataclass
 
 from notion_client import Client
 
+NOTION_VERSION = "2025-09-03"
+
+
 @dataclass(frozen=True)
 class NotionDatabases:
     activities: str
@@ -28,7 +31,7 @@ def get_notion_client() -> tuple[Client, NotionDatabases]:
         raise ValueError(
             "Set NOTION_TOKEN to the raw Notion token only; do not include 'Bearer '."
         )
-    notion_client = Client(auth=notion_token)
+    notion_client = Client(auth=notion_token, notion_version=NOTION_VERSION)
 
     print("Notion client initialized.")
 
