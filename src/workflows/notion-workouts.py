@@ -5,6 +5,7 @@ import os
 import re
 from datetime import date, datetime, timedelta
 from typing import Any
+import unicodedata
 from zoneinfo import ZoneInfo
 
 from garminconnect import Garmin
@@ -17,11 +18,43 @@ DATE_PROPERTY = "Date de la  séance"
 TITLE_PROPERTY = "Nom"
 DISCIPLINE_PROPERTY = "Discipline"
 DONE_PROPERTY = "Terminé"
-STRENGTH_DISCIPLINE = "Renforcement"
 LOOKAHEAD_DAYS = max(1, min(int(os.getenv("GARMIN_WORKOUTS_LOOKAHEAD_DAYS", "14")), 90))
 PAGE_MARKER_LENGTH = 16
 HASH_LENGTH = 8
 SYNC_TAG = re.compile(r"\[NTN:([a-f0-9]{16}):([a-f0-9]{8})(?::(P|S))?\]$", re.IGNORECASE)
+
+SPORT_TYPES = {
+    "running": {"sportTypeId": 1, "sportTypeKey": "running", "displayOrder": 1},
+    "cycling": {"sportTypeId": 2, "sportTypeKey": "cycling", "displayOrder": 2},
+    "other": {"sportTypeId": 3, "sportTypeKey": "other", "displayOrder": 4},
+    "swimming": {"sportTypeId": 4, "sportTypeKey": "swimming", "displayOrder": 3},
+    "strength_training": {"sportTypeId": 5, "sportTypeKey": "strength_training", "displayOrder": 5},
+    "cardio_training": {"sportTypeId": 6, "sportTypeKey": "cardio_training", "displayOrder": 6},
+    "yoga": {"sportTypeId": 7, "sportTypeKey": "yoga", "displayOrder": 7},
+    "pilates": {"sportTypeId": 8, "sportTypeKey": "pilates", "displayOrder": 8},
+    "hiit": {"sportTypeId": 9, "sportTypeKey": "hiit", "displayOrder": 9},
+    "mobility": {"sportTypeId": 11, "sportTypeKey": "mobility", "displayOrder": 11},
+}
+DISCIPLINE_SPORTS = {
+    "courseapied": "running",
+    "velo": "cycling",
+    "natation": "swimming",
+    "renforcement": "strength_training",
+    "hautducorps": "strength_training",
+    "basducorps": "strength_training",
+    "touslecorps": "strength_training",
+    "yoga": "yoga",
+    "mobilite": "mobility",
+    "etirement": "mobility",
+    "cardio": "cardio_training",
+    "pilates": "pilates",
+    "hiit": "hiit",
+    "gymnastique": "other",
+    "escalade": "other",
+    "skidefond": "other",
+    "marcherando": "other",
+}
+NON_WORKOUT_DISCIPLINES = {"repos", "massage"}
 
 EXERCISE_LINE = re.compile(
     r"^(?P<reps>\d+)\s*[x×]\s*(?P<name>.+?)"
@@ -39,7 +72,9 @@ REST_TIME = re.compile(
 
 
 def normalize_name(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+    decomposed = unicodedata.normalize("NFKD", value.casefold())
+    unaccented = "".join(character for character in decomposed if not unicodedata.combining(character))
+    return re.sub(r"[^a-z0-9]+", "", unaccented)
 
 
 def page_title(page: dict[str, Any]) -> str:
@@ -97,7 +132,6 @@ def upcoming_pages(
         "and": [
             {"property": DATE_PROPERTY, "date": {"on_or_after": today.isoformat()}},
             {"property": DATE_PROPERTY, "date": {"before": end.isoformat()}},
-            {"property": DISCIPLINE_PROPERTY, "multi_select": {"contains": STRENGTH_DISCIPLINE}},
             {"property": DONE_PROPERTY, "checkbox": {"equals": False}},
         ]
     }
@@ -164,6 +198,54 @@ def page_content_lines(notion: NotionClient, page_id: str) -> list[str]:
 
     read_children(page_id)
     return [line.strip() for line in lines if line.strip()]
+
+
+def page_disciplines(page: dict[str, Any]) -> list[str]:
+    value = page.get("properties", {}).get(DISCIPLINE_PROPERTY, {})
+    selections = value.get("multi_select") or []
+    if not selections and value.get("select"):
+        selections = [value["select"]]
+    return [item.get("name", "").strip() for item in selections if item.get("name")]
+
+
+def page_source_lines(page: dict[str, Any]) -> list[str]:
+    value = page.get("properties", {}).get("Source", {})
+    runs = value.get("rich_text") or value.get("title") or []
+    source = "".join(item.get("plain_text", "") for item in runs)
+    return [line.strip() for line in source.splitlines() if line.strip()]
+
+
+def sport_for_disciplines(disciplines: list[str]) -> dict[str, Any] | None:
+    normalized = [normalize_name(value) for value in disciplines]
+    if any(value in NON_WORKOUT_DISCIPLINES for value in normalized):
+        return None
+    priority = (
+        "courseapied", "velo", "natation", "yoga", "pilates", "hiit", "cardio",
+        "mobilite", "etirement", "renforcement", "hautducorps", "basducorps",
+        "touslecorps", "gymnastique", "escalade", "skidefond", "marcherando",
+    )
+    for discipline in priority:
+        if discipline in normalized:
+            return dict(SPORT_TYPES[DISCIPLINE_SPORTS[discipline]])
+    return None
+
+
+def _training_lines(lines: list[str]) -> list[str]:
+    selected: list[str] = []
+    active = False
+    for raw_line in lines:
+        line = raw_line.replace("\\.", ".").strip()
+        normalized = normalize_name(line)
+        if re.match(r"^(?:echauffement|warmup|seance|entrainement)", normalized):
+            active = True
+            selected.append(line)
+            continue
+        if re.match(r"^(?:retouraucalme|bilandelaseance|bilan)\b", normalized):
+            active = False
+            continue
+        if active and line:
+            selected.append(line)
+    return selected
 
 
 def _parse_rest_seconds(line: str) -> int | None:
@@ -247,6 +329,406 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
 
     save_section()
     return sections
+
+
+DURATION_TOKEN = re.compile(
+    r"(?P<amount>\d+(?:[,.]\d+)?)\s*(?P<unit>minutes?|mins?|mn|secondes?|secs?|s\b|[’'′])\s*"
+    r"(?P<label>[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ_-]*)?",
+    re.IGNORECASE,
+)
+REPEAT_TOKEN = re.compile(r"(?P<count>\d+)\s*[x×]\s*\((?P<body>[^)]*)\)", re.IGNORECASE)
+SWIM_LINE = re.compile(
+    r"^\s*(?P<distance>\d{2,5})\s*m(?:ètres?)?\s*[—–-]\s*(?P<stroke>.+?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _fold_text(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value.casefold())
+    return "".join(character for character in decomposed if not unicodedata.combining(character))
+
+
+def _duration_seconds(match: re.Match[str]) -> int:
+    amount = float(match.group("amount").replace(",", "."))
+    unit = match.group("unit").casefold()
+    if unit.startswith(("min", "mn", "’", "'", "′")):
+        return max(1, round(amount * 60))
+    return max(1, round(amount))
+
+
+def _clean_plan_line(value: str) -> str:
+    line = value.replace("\\.", ".").strip()
+    line = re.sub(r"^(?:[-*•]\s+|[☐☑]\s*)", "", line).strip()
+    return re.sub(r"\s+", " ", line)
+
+
+def _step_type(kind: str) -> dict[str, Any]:
+    values = {
+        "warmup": (1, "warmup", 1),
+        "cooldown": (2, "cooldown", 2),
+        "interval": (3, "interval", 3),
+        "recovery": (4, "recovery", 4),
+        "rest": (5, "rest", 5),
+    }
+    step_id, key, display_order = values.get(kind, values["interval"])
+    return {"stepTypeId": step_id, "stepTypeKey": key, "displayOrder": display_order}
+
+
+def _time_or_manual_step(
+    step_order: int,
+    description: str,
+    duration_seconds: int | None = None,
+    kind: str = "interval",
+) -> dict[str, Any]:
+    step: dict[str, Any] = {
+        "type": "ExecutableStepDTO",
+        "stepOrder": step_order,
+        "stepType": _step_type(kind),
+        "targetType": {
+            "workoutTargetTypeId": 1,
+            "workoutTargetTypeKey": "no.target",
+            "displayOrder": 1,
+        },
+        "description": description[:500],
+    }
+    if duration_seconds is None:
+        step["endCondition"] = {
+            "conditionTypeId": 1,
+            "conditionTypeKey": "lap.button",
+            "displayOrder": 1,
+            "displayable": True,
+        }
+    else:
+        step["endCondition"] = {
+            "conditionTypeId": 2,
+            "conditionTypeKey": "time",
+            "displayOrder": 2,
+            "displayable": True,
+        }
+        step["endConditionValue"] = float(duration_seconds)
+    return step
+
+
+def _distance_step(
+    step_order: int,
+    distance_meters: int,
+    description: str,
+    kind: str,
+) -> dict[str, Any]:
+    return {
+        "type": "ExecutableStepDTO",
+        "stepOrder": step_order,
+        "stepType": _step_type(kind),
+        "endCondition": {
+            "conditionTypeId": 3,
+            "conditionTypeKey": "distance",
+            "displayOrder": 3,
+            "displayable": True,
+        },
+        "endConditionValue": float(distance_meters),
+        "targetType": {
+            "workoutTargetTypeId": 1,
+            "workoutTargetTypeKey": "no.target",
+            "displayOrder": 1,
+        },
+        "description": description[:500],
+    }
+
+
+def _step_kind(label: str, sport_key: str) -> str:
+    normalized = normalize_name(label)
+    if any(word in normalized for word in ("echauffement", "warmup", "miseenselle")):
+        return "warmup"
+    if any(word in normalized for word in ("retouraucalme", "cooldown")):
+        return "cooldown"
+    if any(word in normalized for word in ("recuperation", "repos", "marche")):
+        return "recovery"
+    if sport_key == "cycling" and normalized in {"l", "facile", "low"}:
+        return "recovery"
+    if sport_key == "running" and normalized in {"m", "walk"}:
+        return "recovery"
+    return "interval"
+
+
+def _time_segment(
+    match: re.Match[str],
+    full_line: str,
+    sport_key: str,
+) -> dict[str, Any]:
+    label = (match.group("label") or "").strip()
+    if label.casefold() in {"de", "du", "la", "le", "pour"}:
+        suffix = full_line[match.end():].strip(" ,;:+-")
+        label = suffix.split()[0] if suffix else ""
+    context = _fold_text(full_line)
+    if not label and "echauffement" in context:
+        label = "Échauffement"
+    elif not label and any(word in context for word in ("retour au calme", "cooldown")):
+        label = "Retour au calme"
+    elif not label:
+        prefix = re.split(r"[+;/]", full_line[:match.start()])[-1].strip(" ():")
+        label = prefix.split()[-1] if prefix else "Effort"
+    return {
+        "duration_seconds": _duration_seconds(match),
+        "kind": _step_kind(label, sport_key),
+        "description": label or "Étape",
+    }
+
+
+def _cardio_tokens(line: str, sport_key: str) -> list[dict[str, Any]]:
+    groups = list(REPEAT_TOKEN.finditer(line))
+    tokens: list[tuple[int, str, Any]] = [
+        (group.start(), "repeat", group) for group in groups
+    ]
+    for match in DURATION_TOKEN.finditer(line):
+        if not any(group.start() <= match.start() < group.end() for group in groups):
+            tokens.append((match.start(), "time", match))
+    tokens.sort(key=lambda item: item[0])
+
+    parsed: list[dict[str, Any]] = []
+    for _, token_type, token in tokens:
+        if token_type == "repeat":
+            inner = [
+                _time_segment(match, token.group("body"), sport_key)
+                for match in DURATION_TOKEN.finditer(token.group("body"))
+            ]
+            if inner:
+                parsed.append({"repeat": int(token.group("count")), "steps": inner})
+        else:
+            parsed.append(_time_segment(token, line, sport_key))
+    return parsed
+
+
+def _parse_cardio_steps(lines: list[str], sport_key: str) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    order = 1
+    for raw_line in lines:
+        line = _clean_plan_line(raw_line)
+        if not line or not DURATION_TOKEN.search(line):
+            continue
+        search_line = _fold_text(line)
+        if sport_key == "running":
+            relevant = re.search(
+                r"\b(?:m|c|course|marche|footing|echauffement|warm.?up|cooldown|recuperation|fractionne)\b",
+                search_line,
+                re.IGNORECASE,
+            )
+        else:
+            relevant = re.search(
+                r"\b(?:v|l|warm.?up|echauffement|cooldown|recuperation|facile|tempo|intervalle|effort)\b",
+                line,
+                re.IGNORECASE,
+            )
+        if not relevant:
+            continue
+        for item in _cardio_tokens(line, sport_key):
+            if "repeat" in item:
+                children = [
+                    _time_or_manual_step(
+                        index,
+                        child["description"],
+                        child["duration_seconds"],
+                        child["kind"],
+                    )
+                    for index, child in enumerate(item["steps"], start=1)
+                ]
+                steps.append(_repeat_group(
+                    max(1, item["repeat"]), children, order, skip_last_rest=False
+                ))
+                order += len(children) + 2
+            else:
+                steps.append(_time_or_manual_step(
+                    order,
+                    item["description"],
+                    item["duration_seconds"],
+                    item["kind"],
+                ))
+                order += 1
+    return steps
+
+
+def _parse_swim_steps(lines: list[str]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    order = 1
+    section_kind = "interval"
+    for raw_line in lines:
+        line = _clean_plan_line(raw_line)
+        normalized = normalize_name(line)
+        if "echauffement" in normalized:
+            section_kind = "warmup"
+        elif "retouraucalme" in normalized:
+            section_kind = "cooldown"
+        elif "seanceprincipale" in normalized or normalized == "seance":
+            section_kind = "interval"
+
+        match = SWIM_LINE.match(line)
+        if match:
+            steps.append(_distance_step(
+                order,
+                int(match.group("distance")),
+                f"{match.group('stroke').strip()} · {line}",
+                section_kind,
+            ))
+            order += 1
+        elif re.match(r"^repos\s*[:：]", line, re.IGNORECASE) and steps:
+            seconds = _parse_rest_seconds(line)
+            if seconds:
+                steps.append(_time_or_manual_step(order, line, seconds, "recovery"))
+                order += 1
+    return steps
+
+
+def _numbered_routine_steps(lines: list[str]) -> list[dict[str, Any]]:
+    items: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    active = False
+    for raw_line in lines:
+        line = _clean_plan_line(raw_line)
+        normalized = normalize_name(line)
+        if re.match(r"^(?:echauffement|warmup|seance|entrainement)\b", normalized):
+            active = True
+            continue
+        if re.match(r"^(?:retouraucalme|bilandelaseance|bilan)\b", normalized):
+            if current:
+                items.append(current)
+                current = None
+            active = False
+            continue
+        if not active:
+            continue
+        match = re.match(r"^\d+\s*[.)]\s*(.+)$", line)
+        if match:
+            if current:
+                items.append(current)
+            title = match.group(1).strip()
+            if normalize_name(title) in {"echauffement", "seanceprincipale", "retouraucalme"}:
+                current = None
+                continue
+            current = {"title": title, "details": ""}
+        elif current and line:
+            current["details"] = (current["details"] + " " + line).strip()
+    if current:
+        items.append(current)
+
+    steps: list[dict[str, Any]] = []
+    for order, item in enumerate(items, start=1):
+        description = item["title"]
+        if item["details"]:
+            description += " — " + item["details"]
+        durations = list(DURATION_TOKEN.finditer(description))
+        duration = None
+        lower = description.casefold()
+        complex_timing = any(word in lower for word in (
+            "chaque côté", "chaque cote", "chaque jambe", "série", "series",
+            "recommencer", "pause",
+        ))
+        if len(durations) == 1 and not complex_timing:
+            duration = _duration_seconds(durations[0])
+        steps.append(_time_or_manual_step(order, description, duration))
+    return steps
+
+
+def _generic_prompt_steps(lines: list[str]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    for raw_line in lines:
+        line = _clean_plan_line(raw_line)
+        normalized = normalize_name(line)
+        if not line or normalized in {
+            "echauffement", "seance", "seanceprincipale", "retouraucalme"
+        } or normalized.endswith("retouraucalme"):
+            continue
+        if line.casefold().startswith(("source:", "distance totale", "consigne deload")):
+            continue
+        match = DURATION_TOKEN.search(line)
+        duration = _duration_seconds(match) if match else None
+        steps.append(_time_or_manual_step(len(steps) + 1, line, duration))
+    return steps
+
+
+def _estimated_seconds(steps: list[dict[str, Any]]) -> int:
+    total = 0
+    for step in steps:
+        if step.get("type") == "RepeatGroupDTO":
+            total += _estimated_seconds(step.get("workoutSteps", [])) * int(step.get("numberOfIterations", 1))
+        elif step.get("endCondition", {}).get("conditionTypeKey") == "time":
+            total += int(step.get("endConditionValue") or 0)
+    return total
+
+
+def _generic_workout(
+    title: str,
+    page_id: str,
+    discipline_text: str,
+    source_text: str,
+    sport_type: dict[str, Any],
+    steps: list[dict[str, Any]],
+) -> tuple[dict[str, Any], str]:
+    if not steps:
+        raise ValueError("Aucune consigne exploitable dans cette séance.")
+    page_marker = page_id.replace("-", "").casefold()[:PAGE_MARKER_LENGTH]
+    digest = hashlib.sha256(
+        (title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
+    ).hexdigest()[:HASH_LENGTH]
+    marker = f"[NTN:{page_marker}:{digest}:P]"
+    workout = {
+        "workoutName": f"{title[:48].rstrip()} {marker}"[:100],
+        "sportType": dict(sport_type),
+        "estimatedDurationInSecs": _estimated_seconds(steps),
+        "workoutSegments": [{
+            "segmentOrder": 1,
+            "sportType": dict(sport_type),
+            "workoutSteps": steps,
+        }],
+        "description": (
+            f"Créé automatiquement depuis la séance Notion « {title} » "
+            f"(discipline : {discipline_text}). Les étapes sans durée attendent une validation manuelle."
+        )[:1000],
+    }
+    return workout, marker
+
+
+def build_garmin_workout(
+    title: str,
+    page_id: str,
+    disciplines: list[str],
+    lines: list[str],
+    source_lines: list[str],
+    source_text: str,
+) -> tuple[dict[str, Any], str]:
+    sport_type = sport_for_disciplines(disciplines)
+    if sport_type is None:
+        raise ValueError("Cette discipline n'est pas un entraînement à envoyer sur la montre.")
+    sport_key = sport_type["sportTypeKey"]
+    discipline_text = ", ".join(disciplines)
+    plan_lines = _training_lines(lines) + source_lines
+
+    if sport_key == "strength_training":
+        sections = parse_sections(lines + source_lines)
+        if sections:
+            return _build_strength_workout(
+                title, page_id, sections, discipline_text + "\n" + source_text
+            )
+        raise ValueError("Aucun atelier de renforcement exploitable n'a été trouvé.")
+
+    if sport_key in {"running", "cycling"}:
+        if sport_key == "cycling" and any(
+            re.search(r"\b(?:repeat|repeter|repete)\b", _fold_text(line))
+            and not REPEAT_TOKEN.search(line)
+            for line in plan_lines
+        ):
+            raise ValueError(
+                "Le programme vélo demande une répétition sans indiquer combien de fois. "
+                "Précise le nombre, par exemple 4x (5 min effort / 2 min récupération)."
+            )
+        steps = _parse_cardio_steps(plan_lines, sport_key)
+    elif sport_key == "swimming":
+        steps = _parse_swim_steps(plan_lines)
+    else:
+        steps = _numbered_routine_steps(lines)
+        if not steps:
+            steps = _generic_prompt_steps(plan_lines)
+    return _generic_workout(
+        title, page_id, discipline_text, source_text, sport_type, steps
+    )
 
 
 def _resolve_exercise(name: str) -> tuple[str, str, bool]:
@@ -360,7 +842,7 @@ def _repeat_group(
     }
 
 
-def build_garmin_workout(
+def _build_strength_workout(
     title: str,
     page_id: str,
     sections: list[dict[str, Any]],
@@ -457,15 +939,21 @@ def sync_page(
     page: dict[str, Any],
     existing_workouts: list[dict[str, Any]],
 ) -> bool:
-    title = page_title(page) or "Renforcement"
-    lines = page_content_lines(notion, page["id"])
-    source_text = "\n".join(lines)
-    sections = parse_sections(lines)
-    if not sections:
-        print(f"Pas de texte d'atelier exploitable dans « {title} » ; aucun envoi.")
+    title = page_title(page) or "Séance"
+    disciplines = page_disciplines(page)
+    if sport_for_disciplines(disciplines) is None:
+        print(f"Séance ignorée sur la montre (repos, massage ou discipline inconnue) : « {title} ».")
         return False
-
-    workout, marker = build_garmin_workout(title, page["id"], sections, source_text)
+    lines = page_content_lines(notion, page["id"])
+    source_lines = page_source_lines(page)
+    source_text = "\n".join(lines + source_lines)
+    try:
+        workout, marker = build_garmin_workout(
+            title, page["id"], disciplines, lines, source_lines, source_text
+        )
+    except ValueError as error:
+        print(f"« {title} » non envoyée : {error}")
+        return False
     page_marker = f"[NTN:{page['id'].replace('-', '').casefold()[:PAGE_MARKER_LENGTH]}:"
     existing = next(
         (
@@ -522,7 +1010,7 @@ def main() -> None:
     today = datetime.now(ZoneInfo("Europe/Paris")).date()
     pages = upcoming_pages(notion, data_source_id, today)
     if not pages:
-        print(f"Aucun entraînement de renforcement prévu dans les {LOOKAHEAD_DAYS} prochains jours.")
+        print(f"Aucune séance prévue dans les {LOOKAHEAD_DAYS} prochains jours.")
         return
 
     existing_workouts = all_garmin_workouts(garmin)
