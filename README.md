@@ -4,7 +4,7 @@ Ce dépôt reprend le projet [garmin-to-notion de chloevoyer](https://github.com
 
 ## Ce qui est synchronisé
 
-Une fois configuré, GitHub Actions importe les activités Garmin chaque jour et peut aussi être lancé manuellement. Le script inscrit le nom, la date, la discipline, la distance, la durée, la fréquence cardiaque, les effets d'entraînement, la vitesse, les watts et le dénivelé lorsque Garmin fournit ces données. Les doublons sont recherchés avec le nom et la date.
+Une fois configuré, GitHub Actions importe les activités Garmin chaque jour et peut aussi être lancé manuellement. Pour chaque activité terminée, le script cherche la séance prévue à la même date : d'abord avec le même nom, puis avec la même discipline si une seule séance correspond. Il met à jour cette ligne avec les mesures fournies par Garmin et coche « Terminé », en conservant les informations prévues et les notes personnelles. Si aucune séance correspondante n'est trouvée, il crée une nouvelle ligne. Les mesures importées peuvent inclure la distance, la durée, la fréquence cardiaque, les effets d'entraînement, la vitesse, les watts, la respiration et le dénivelé.
 
 Les autres synchronisations du projet source (records personnels, pas et sommeil) ne sont pas lancées car elles nécessitent des bases Notion séparées.
 
@@ -23,7 +23,7 @@ Les autres synchronisations du projet source (records personnels, pas et sommeil
    Saisir les identifiants Garmin et le code de double authentification uniquement dans cette fenêtre locale. Copier tout le JSON affiché et le sauvegarder comme secret GitHub `GARMIN_AUTH_TOKEN`. Ne jamais publier ce JSON.
 5. Dans GitHub, ouvrir **Actions → Sync Garmin to Notion → Run workflow** pour le premier lancement. Ensuite la synchronisation est quotidienne.
 
-La synchronisation ajoute uniquement les activités qui ne sont pas déjà présentes, afin de préserver les modifications manuelles dans Notion. Les champs manquants dans Garmin sont laissés vides.
+Les champs subjectifs (qualité, douleur, charge mentale, énergie après 24 h), le matériel, le lieu et la météo restent à renseigner dans Notion. Les champs que Garmin ne fournit pas pour une activité sont laissés tels quels.
 
 ## Lancer depuis son ordinateur
 
