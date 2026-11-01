@@ -11,6 +11,7 @@ from src.helpers.garmin_report import (
     find_activity_report_page,
     render_activity_report,
 )
+from src.helpers.garmin_route import add_activity_gpx, page_has_activity_gpx
 
 DATE_PROPERTY = "Date de la  séance"
 TITLE_PROPERTY = "Nom"
@@ -282,27 +283,60 @@ def main():
                 day,
                 activity_id,
             )
-        if already_reported:
-            print(f"Bilan Garmin déjà présent : {_page_title(already_reported)}")
-            continue
 
-        planned = find_planned_session(
-            notion,
-            activities_data_source_id,
-            day,
-            name,
-            discipline,
-        )
-        if planned:
-            page = planned
-            update_planned_session(notion, planned, activity)
-            print(f"Séance planifiée mise à jour : {_page_title(planned)}")
+        if already_reported:
+            page = already_reported
+            print(f"Bilan Garmin déjà présent : {_page_title(page)}")
         else:
-            page = create_activity(notion, activities_data_source_id, activity, name, discipline)
-            print(f"Nouvelle activité ajoutée : {name}")
+            planned = find_planned_session(
+                notion,
+                activities_data_source_id,
+                day,
+                name,
+                discipline,
+            )
+            if planned:
+                page = planned
+                update_planned_session(notion, planned, activity)
+                print(f"Séance planifiée mise à jour : {_page_title(planned)}")
+            else:
+                page = create_activity(
+                    notion,
+                    activities_data_source_id,
+                    activity,
+                    name,
+                    discipline,
+                )
+                print(f"Nouvelle activité ajoutée : {name}")
 
         if not activity_id:
-            print("Bilan graphique ignoré : Garmin n'a pas fourni l'identifiant de l'activité.")
+            print("Bilan et parcours ignorés : Garmin n'a pas fourni l'identifiant de l'activité.")
+            continue
+
+        if not page_has_activity_gpx(page, activity_id):
+            try:
+                gpx_content = garmin.download_activity(
+                    activity_id,
+                    dl_fmt=garmin.ActivityDownloadFormat.GPX,
+                )
+            except Exception as error:
+                print(f"Parcours GPX indisponible pour « {name} » : {error}")
+            else:
+                if not gpx_content or b"<gpx" not in gpx_content[:4096].lower():
+                    print(f"Garmin n'a pas fourni de parcours GPX pour « {name} ».")
+                else:
+                    added = add_activity_gpx(
+                        notion,
+                        page["id"],
+                        activity_id,
+                        gpx_content,
+                    )
+                    if added:
+                        print(f"Parcours GPX ajouté dans « {ROUTE_PROPERTY} » : {name}")
+                    else:
+                        print(f"Parcours GPX déjà présent : {name}")
+
+        if already_reported:
             continue
 
         try:
