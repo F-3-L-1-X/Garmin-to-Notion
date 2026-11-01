@@ -434,6 +434,34 @@ def _block_text(block: dict) -> str:
     return "".join(part.get("plain_text", "") for part in rich_text).strip()
 
 
+def find_activity_report_page(
+    notion: NotionClient,
+    data_source_id: str,
+    day: str,
+    activity_id: str,
+) -> dict | None:
+    next_day = (datetime.fromisoformat(day) + timedelta(days=1)).date().isoformat()
+    cursor = None
+    while True:
+        options = {
+            "data_source_id": data_source_id,
+            "filter": {"and": [
+                {"property": "Date de la  séance", "date": {"on_or_after": day}},
+                {"property": "Date de la  séance", "date": {"before": next_day}},
+            ]},
+            "page_size": 100,
+        }
+        if cursor:
+            options["start_cursor"] = cursor
+        response = notion.data_sources.query(**options)
+        for page in response.get("results", []):
+            if page_has_activity_report(notion, page["id"], activity_id):
+                return page
+        if not response.get("has_more"):
+            return None
+        cursor = response.get("next_cursor")
+
+
 def _report_container(notion: NotionClient, page_id: str) -> str:
     for block in _children(notion, page_id):
         block_type = block.get("type", "")
@@ -464,6 +492,8 @@ def page_has_activity_report(
     page_id: str,
     activity_id: str,
 ) -> bool:
+    marker = f"garmin-{activity_id}-bilan"
+    caption_marker = f"activité Garmin : {activity_id}"
     for block in _children(notion, page_id):
         block_type = block.get("type", "")
         payload = block.get(block_type, {})
@@ -474,11 +504,16 @@ def page_has_activity_report(
         for child in _children(notion, block["id"]):
             if child.get("type") != "image":
                 continue
+            image = child.get("image", {})
             file_name = (
-                child.get("image", {}).get("file", {}).get("name")
-                or child.get("image", {}).get("external", {}).get("url", "")
+                image.get("file", {}).get("name")
+                or image.get("external", {}).get("url", "")
             )
-            if f"garmin-{activity_id}-bilan" in file_name:
+            caption = "".join(
+                part.get("plain_text", "")
+                for part in image.get("caption", [])
+            ).casefold()
+            if marker in file_name or caption_marker in caption:
                 return True
     return False
 
@@ -489,6 +524,9 @@ def add_or_update_activity_report(
     activity_id: str,
     svg: bytes,
 ) -> None:
+    if page_has_activity_report(notion, page_id, activity_id):
+        return
+
     container_id = _report_container(notion, page_id)
     filename = f"garmin-{activity_id}-bilan.svg"
     upload = notion.file_uploads.create(
@@ -503,8 +541,7 @@ def add_or_update_activity_report(
     if uploaded.get("status") not in ("uploaded", "completed", None):
         raise RuntimeError("Notion n'a pas confirmé le téléversement du bilan graphique.")
 
-    existing = _children(notion, container_id)
-    response = notion.blocks.children.append(
+    notion.blocks.children.append(
         block_id=container_id,
         children=[
             {
@@ -513,20 +550,14 @@ def add_or_update_activity_report(
                     "type": "file_upload",
                     "file_upload": {"id": upload["id"]},
                     "caption": [
-                        {"type": "text", "text": {"content": "Graphiques Garmin"}}
+                        {
+                            "type": "text",
+                            "text": {
+                                "content": f"Graphiques Garmin · activité Garmin : {activity_id}"
+                            },
+                        }
                     ],
                 },
             }
         ],
     )
-    new_id = response["results"][0]["id"]
-
-    for block in existing:
-        if block.get("type") != "image":
-            continue
-        file_name = block.get("image", {}).get("file", {}).get("name", "")
-        if f"garmin-{activity_id}-bilan" in file_name:
-            notion.blocks.update(block_id=block["id"], in_trash=True)
-
-    if not new_id:
-        raise RuntimeError("Notion n'a pas confirmé l'ajout du bilan graphique.")
