@@ -15,7 +15,7 @@ Les autres synchronisations du projet source (records personnels, pas et sommeil
    - `NOTION_TOKEN` : le secret de l'intégration Notion, sans le préfixe `Bearer ` ;
    - `NOTION_DB_ID` : `2da53733bea98160bdcae88a07aea5eb` ;
    - `GARMIN_AUTH_TOKEN` : à créer à l'étape ci-dessous.
-3. Si la base contient plusieurs sources de données, ajouter aussi le secret `NOTION_DATA_SOURCE_ID` avec l'ID de la source utilisée pour les séances. Pour trouver cet ID, ouvrir la base dans Notion, puis **••• → Gérer les sources de données → Copier l'ID de la source**. Si la base n'a qu'une seule source, ce secret est inutile.
+3. Le programme sélectionne automatiquement la source de données nommée « Journal d'entraînement ». Si un lancement GitHub demande explicitement `NOTION_DATA_SOURCE_ID`, ouvrir la base dans Notion, puis **••• → Gérer les sources de données → Copier l'ID de la source** et enregistrer cet ID comme secret GitHub.
 4. Installer `uv` sur Windows avec PowerShell : `winget install --id=astral-sh.uv -e`, puis fermer et rouvrir PowerShell.
 5. Dans PowerShell, lancer :
    ```powershell
