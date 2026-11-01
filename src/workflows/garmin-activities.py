@@ -27,6 +27,18 @@ def get_activity_data_source_id(notion: NotionClient, database_id: str) -> str:
             "NOTION_DATA_SOURCE_ID ne correspond à aucune source de données de NOTION_DB_ID."
         )
 
+    preferred_sources = [
+        source for source in data_sources
+        if source.get("name", "").strip().casefold() == "journal d'entraînement"
+    ]
+    if len(preferred_sources) == 1:
+        return preferred_sources[0]["id"]
+    if len(preferred_sources) > 1:
+        raise ValueError(
+            "Plusieurs sources de données Notion portent le nom « Journal d'entraînement ». "
+            "Ajoute la bonne valeur comme secret GitHub NOTION_DATA_SOURCE_ID."
+        )
+
     if len(data_sources) == 1:
         return data_sources[0]["id"]
 
