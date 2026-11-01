@@ -8,6 +8,8 @@ Une fois configuré, GitHub Actions vérifie les nouvelles activités Garmin tou
 
 Pour les activités où Garmin fournit des données détaillées, notamment la course à pied, le programme crée aussi dans la page Notion un bloc repliable « Bilan de la séance » avec les courbes disponibles (allure, fréquence cardiaque, cadence, course/marche) et les zones Garmin de fréquence cardiaque et de puissance. Le bilan est une image graphique générée à partir des données détaillées Garmin, pas une capture d'écran de Garmin Connect. Les courbes ou zones absentes de l'activité ne sont pas affichées. Une activité déjà accompagnée de son bilan n'est pas recopiée à chaque passage.
 
+Quand Garmin fournit un parcours GPS, le fichier `.gpx` original est également ajouté dans la propriété fichier « Parcours » de la même séance. Les parcours déjà joints ne sont pas ajoutés une seconde fois.
+
 Les autres synchronisations du projet source (records personnels, pas et sommeil) ne sont pas lancées car elles nécessitent des bases Notion séparées.
 
 ## Configuration rapide
