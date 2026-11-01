@@ -5,6 +5,7 @@ import os
 import re
 from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from garminconnect import Garmin
 from garminconnect import exercises as garmin_exercises
@@ -503,7 +504,7 @@ def main() -> None:
     garmin, _ = get_garmin_client()
     notion, databases = get_notion_client()
     data_source_id = get_activity_data_source_id(notion, databases.activities)
-    today = datetime.now().date()
+    today = datetime.now(ZoneInfo("Europe/Paris")).date()
     pages = upcoming_pages(notion, data_source_id, today)
     if not pages:
         print(f"Aucun entraînement de renforcement prévu dans les {LOOKAHEAD_DAYS} prochains jours.")
