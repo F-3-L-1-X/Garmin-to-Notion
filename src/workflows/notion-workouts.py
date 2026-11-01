@@ -21,6 +21,7 @@ STRENGTH_DISCIPLINE = "Renforcement"
 LOOKAHEAD_DAYS = max(1, min(int(os.getenv("GARMIN_WORKOUTS_LOOKAHEAD_DAYS", "14")), 90))
 PAGE_MARKER_LENGTH = 16
 HASH_LENGTH = 8
+SYNC_TAG = re.compile(r"\\[NTN:([a-f0-9]{16}):([a-f0-9]{8})(?::(P|S))?\\]$", re.IGNORECASE)
 
 EXERCISE_LINE = re.compile(
     r"^(?P<reps>\d+)\s*[x×]\s*(?P<name>.+?)"
@@ -476,15 +477,26 @@ def sync_page(
     )
 
     if existing:
-        if existing.get("workoutName") == workout["workoutName"]:
-            print(f"Entraînement Garmin déjà à jour : « {title} ».")
-            return False
         workout_id = existing.get("workoutId")
         if not workout_id:
             raise ValueError(f"Identifiant Garmin absent pour « {title} ».")
+        existing_tag = SYNC_TAG.search(existing.get("workoutName", ""))
+        current_tag = SYNC_TAG.search(workout["workoutName"])
+        if (
+            existing_tag
+            and current_tag
+            and existing_tag.group(2) == current_tag.group(2)
+            and existing_tag.group(3) == "S"
+        ):
+            print(f"Entraînement Garmin déjà à jour : « {title} ».")
+            return False
+
         garmin.update_workout(workout_id, workout)
         garmin.push_workout_to_device(workout_id=workout_id)
-        existing["workoutName"] = workout["workoutName"]
+        sent_workout = dict(workout)
+        sent_workout["workoutName"] = workout["workoutName"].replace(":P]", ":S]")
+        garmin.update_workout(workout_id, sent_workout)
+        existing["workoutName"] = sent_workout["workoutName"]
         print(f"Entraînement Garmin mis à jour et envoyé à la montre : « {title} » ({marker}).")
         return True
 
@@ -493,8 +505,11 @@ def sync_page(
     if not workout_id:
         raise ValueError(f"Garmin n'a pas renvoyé l'identifiant de « {title} ».")
     garmin.push_workout_to_device(workout_id=workout_id)
+    sent_workout = dict(workout)
+    sent_workout["workoutName"] = workout["workoutName"].replace(":P]", ":S]")
+    garmin.update_workout(workout_id, sent_workout)
     existing_workouts.append(
-        {"workoutId": workout_id, "workoutName": workout["workoutName"]}
+        {"workoutId": workout_id, "workoutName": sent_workout["workoutName"]}
     )
     print(f"Entraînement Garmin créé et envoyé à la montre : « {title} » ({marker}).")
     return True
