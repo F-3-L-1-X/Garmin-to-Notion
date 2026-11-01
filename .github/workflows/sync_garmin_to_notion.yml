@@ -18,6 +18,14 @@ jobs:
         uses: astral-sh/setup-uv@v5
       - name: Install dependencies
         run: uv sync
+      - name: Envoyer les entraînements prévus sur la montre
+        env:
+          GARMIN_AUTH_TOKEN: ${{ secrets.GARMIN_AUTH_TOKEN }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
+          GARMIN_WORKOUTS_LOOKAHEAD_DAYS: '14'
+        run: uv run python -m src.workflows.notion-workouts
       - name: Synchroniser les activités Garmin
         env:
           GARMIN_AUTH_TOKEN: ${{ secrets.GARMIN_AUTH_TOKEN }}
