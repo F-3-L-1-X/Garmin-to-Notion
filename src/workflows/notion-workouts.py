@@ -21,14 +21,14 @@ STRENGTH_DISCIPLINE = "Renforcement"
 LOOKAHEAD_DAYS = max(1, min(int(os.getenv("GARMIN_WORKOUTS_LOOKAHEAD_DAYS", "14")), 90))
 PAGE_MARKER_LENGTH = 16
 HASH_LENGTH = 8
-SYNC_TAG = re.compile(r"\\[NTN:([a-f0-9]{16}):([a-f0-9]{8})(?::(P|S))?\\]$", re.IGNORECASE)
+SYNC_TAG = re.compile(r"\[NTN:([a-f0-9]{16}):([a-f0-9]{8})(?::(P|S))?\]$", re.IGNORECASE)
 
 EXERCISE_LINE = re.compile(
     r"^(?P<reps>\d+)\s*[x×]\s*(?P<name>.+?)"
     r"(?:\s*[—–-]\s*(?P<reference>\d+))?$",
     re.IGNORECASE,
 )
-ATELIER_HEADER = re.compile(r"^(?:atelier\s+\d+\b|.*\bemom\b.*)", re.IGNORECASE)
+ATELIER_HEADER = re.compile(r"^(?:atelier\s+\d+\b|emom\b.*)", re.IGNORECASE)
 SETS_LINE = re.compile(r"^s(?:é|e)ries?\s*[:：]\s*(\d+)\b", re.IGNORECASE)
 NOTE_LINE = re.compile(r"^(?:notes?|remarques?)\s*[:：]\s*(.*)$", re.IGNORECASE)
 EMOM_DURATION = re.compile(r"\bemom\b.*?(\d+)\s*(?:min|minutes|mn)\b", re.IGNORECASE)
@@ -369,7 +369,7 @@ def build_garmin_workout(
     compact_page_id = page_id.replace("-", "").casefold()
     digest = hashlib.sha256((title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
     page_marker = compact_page_id[:PAGE_MARKER_LENGTH]
-    marker = f"[NTN:{page_marker}:{digest}]"
+    marker = f"[NTN:{page_marker}:{digest}:P]"
     workout_name = f"{title[:48].rstrip()} {marker}"[:100]
 
     steps: list[dict[str, Any]] = []
