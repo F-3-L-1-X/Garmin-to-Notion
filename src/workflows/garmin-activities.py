@@ -11,7 +11,7 @@ from src.helpers.garmin_report import (
     find_activity_report_page,
     render_activity_report,
 )
-from src.helpers.garmin_route import add_activity_gpx, page_has_activity_gpx
+from src.helpers.garmin_route import ROUTE_PROPERTY, add_activity_gpx, page_has_activity_gpx
 
 DATE_PROPERTY = "Date de la  séance"
 TITLE_PROPERTY = "Nom"
