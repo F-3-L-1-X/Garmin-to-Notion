@@ -8,6 +8,10 @@ on:
       GARMIN_ACTIVITIES_FETCH_LIMIT:
         type: number
         default: 10
+      SYNC_ACTIVITIES:
+        description: Importer aussi les activités Garmin terminées pendant ce lancement manuel
+        type: boolean
+        default: true
 
 jobs:
   sync:
@@ -27,6 +31,7 @@ jobs:
           GARMIN_WORKOUTS_LOOKAHEAD_DAYS: '14'
         run: uv run python -m src.workflows.notion-workouts
       - name: Synchroniser les activités Garmin
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.SYNC_ACTIVITIES }}
         env:
           GARMIN_AUTH_TOKEN: ${{ secrets.GARMIN_AUTH_TOKEN }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
