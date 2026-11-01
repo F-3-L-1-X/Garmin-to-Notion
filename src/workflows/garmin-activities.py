@@ -1,3 +1,4 @@
+import os
 from datetime import UTC, datetime, timedelta
 
 from dotenv import load_dotenv
@@ -12,6 +13,36 @@ TITLE_PROPERTY = "Nom"
 
 def get_all_activities(garmin_client: GarminClient, limit: int = 10) -> list[dict]:
     return garmin_client.get_activities(0, limit)
+
+
+def get_activity_data_source_id(notion: NotionClient, database_id: str) -> str:
+    database = notion.databases.retrieve(database_id=database_id)
+    data_sources = database.get("data_sources", [])
+    requested_id = (os.getenv("NOTION_DATA_SOURCE_ID") or "").strip()
+
+    if requested_id:
+        if any(source.get("id") == requested_id for source in data_sources):
+            return requested_id
+        raise ValueError(
+            "NOTION_DATA_SOURCE_ID ne correspond à aucune source de données de NOTION_DB_ID."
+        )
+
+    if len(data_sources) == 1:
+        return data_sources[0]["id"]
+
+    if not data_sources:
+        raise ValueError(
+            "Aucune source de données trouvée dans la base Notion. "
+            "Vérifie NOTION_DB_ID et l'accès de la connexion à cette base."
+        )
+
+    names = ", ".join(source.get("name", "(sans nom)") for source in data_sources)
+    raise ValueError(
+        "Cette base Notion contient plusieurs sources de données. "
+        "Dans Notion, copie l'ID de la source « Journal d'entraînement », "
+        "puis ajoute-le comme secret GitHub NOTION_DATA_SOURCE_ID. "
+        f"Sources trouvées : {names}."
+    )
 
 
 def discipline_for(type_key: str) -> str | None:
@@ -72,14 +103,14 @@ def _page_title(page: dict) -> str:
 
 def find_planned_session(
     notion: NotionClient,
-    database_id: str,
+    data_source_id: str,
     day: str,
     activity_name: str,
     discipline: str | None,
 ) -> dict | None:
     next_day = (datetime.fromisoformat(day) + timedelta(days=1)).date().isoformat()
-    result = notion.databases.query(
-        database_id=database_id,
+    result = notion.data_sources.query(
+        data_source_id=data_source_id,
         filter={"and": [
             {"property": DATE_PROPERTY, "date": {"on_or_after": day}},
             {"property": DATE_PROPERTY, "date": {"before": next_day}},
@@ -165,7 +196,7 @@ def activity_properties(activity: dict) -> dict:
 
 def create_activity(
     notion: NotionClient,
-    database_id: str,
+    data_source_id: str,
     activity: dict,
     activity_name: str,
     discipline: str | None,
@@ -180,7 +211,10 @@ def create_activity(
     properties[DATE_PROPERTY] = {"date": {"start": start_date(activity)}}
     if discipline:
         properties["Discipline"] = {"multi_select": [{"name": discipline}]}
-    notion.pages.create(parent={"database_id": database_id}, properties=properties)
+    notion.pages.create(
+        parent={"type": "data_source_id", "data_source_id": data_source_id},
+        properties=properties,
+    )
 
 
 def update_planned_session(
@@ -200,6 +234,10 @@ def main():
     load_dotenv()
     garmin, configuration = get_garmin_client()
     notion, databases = get_notion_client()
+    activities_data_source_id = get_activity_data_source_id(
+        notion,
+        databases.activities,
+    )
 
     for activity in get_all_activities(garmin, configuration.activity_fetch_limit):
         name = activity.get("activityName") or "Activité Garmin"
@@ -208,7 +246,7 @@ def main():
         day = activity_day(activity)
         planned = find_planned_session(
             notion,
-            databases.activities,
+            activities_data_source_id,
             day,
             name,
             discipline,
@@ -217,7 +255,7 @@ def main():
             update_planned_session(notion, planned, activity)
             print(f"Séance planifiée mise à jour : {_page_title(planned)}")
         else:
-            create_activity(notion, databases.activities, activity, name, discipline)
+            create_activity(notion, activities_data_source_id, activity, name, discipline)
             print(f"Nouvelle activité ajoutée : {name}")
 
 
