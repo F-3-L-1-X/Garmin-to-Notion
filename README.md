@@ -6,7 +6,7 @@ Ce dépôt reprend le projet [garmin-to-notion de chloevoyer](https://github.com
 
 Une fois configuré, GitHub Actions vérifie les nouvelles activités Garmin toutes les heures et peut aussi être lancé manuellement juste après une séance. Pour chaque activité terminée, le script cherche la séance prévue à la même date : d'abord avec le même nom, puis avec la même discipline si une seule séance correspond. Il met à jour cette ligne avec les mesures fournies par Garmin et coche « Terminé », en conservant les informations prévues et les notes personnelles. Si aucune séance correspondante n'est trouvée, il crée une nouvelle ligne. Les mesures importées peuvent inclure la distance, la durée, la fréquence cardiaque, la charge d'exercice, les effets d'entraînement, la vitesse, les watts, la respiration et le dénivelé.
 
-Pour les activités de course, le programme crée aussi dans la page Notion un bloc repliable « Bilan de la séance » avec les courbes disponibles (allure, fréquence cardiaque, cadence, course/marche) et les zones Garmin de fréquence cardiaque et de puissance. Le bilan est une image graphique générée à partir des données détaillées Garmin, pas une capture d'écran de Garmin Connect. Les courbes ou zones absentes de l'activité ne sont pas affichées. Une activité déjà accompagnée de son bilan n'est pas recopiée à chaque passage.
+Pour les activités où Garmin fournit des données détaillées, notamment la course à pied, le programme crée aussi dans la page Notion un bloc repliable « Bilan de la séance » avec les courbes disponibles (allure, fréquence cardiaque, cadence, course/marche) et les zones Garmin de fréquence cardiaque et de puissance. Le bilan est une image graphique générée à partir des données détaillées Garmin, pas une capture d'écran de Garmin Connect. Les courbes ou zones absentes de l'activité ne sont pas affichées. Une activité déjà accompagnée de son bilan n'est pas recopiée à chaque passage.
 
 Les autres synchronisations du projet source (records personnels, pas et sommeil) ne sont pas lancées car elles nécessitent des bases Notion séparées.
 
@@ -24,7 +24,7 @@ Les autres synchronisations du projet source (records personnels, pas et sommeil
    uv run https://raw.githubusercontent.com/F-3-L-1-X/Garmin-to-Notion/main/scripts/generate-garmin-token.py
    ```
    Saisir les identifiants Garmin et le code de double authentification uniquement dans cette fenêtre locale. Copier tout le JSON affiché et le sauvegarder comme secret GitHub `GARMIN_AUTH_TOKEN`. Ne jamais publier ce JSON.
-6. Dans GitHub, ouvrir **Actions → Sync Garmin to Notion → Run workflow** pour le premier lancement. Ensuite la synchronisation est quotidienne.
+6. Pour le premier essai, ouvrir **Actions → Sync Garmin to Notion → Run workflow** et choisir une limite de `1` activité. Vérifier la page correspondante dans Notion. Ensuite, le contrôle automatique a lieu toutes les heures ; tu peux aussi lancer le workflow manuellement après une séance.
 
 Les champs subjectifs (qualité, douleur, charge mentale, énergie après 24 h), le matériel, le lieu et la météo restent à renseigner dans Notion. Les champs que Garmin ne fournit pas pour une activité sont laissés tels quels.
 
