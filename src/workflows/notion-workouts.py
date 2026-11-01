@@ -777,18 +777,18 @@ def build_garmin_workout(
         )
 
     if sport_key in {"running", "cycling"}:
-        if sport_key == "cycling" and any(
+        ambiguous_bike_repeat = sport_key == "cycling" and any(
             re.search(r"\b(?:repeat|repeter|repete)\b", _fold_text(line))
             and not REPEAT_TOKEN.search(line)
             for line in plan_lines
-        ):
-            raise ValueError(
-                "Le programme vélo demande une répétition sans indiquer combien de fois. "
-                "Précise le nombre, par exemple 4x (5 min effort / 2 min récupération)."
-            )
-        steps = _parse_cardio_steps(plan_lines, sport_key)
-        if not steps:
-            steps = _generic_prompt_steps(plan_lines)
+        )
+        if ambiguous_bike_repeat:
+            # Keep every instruction on Garmin without guessing the repeat count.
+            steps = _generic_prompt_steps(lines + source_lines)
+        else:
+            steps = _parse_cardio_steps(plan_lines, sport_key)
+            if not steps:
+                steps = _generic_prompt_steps(plan_lines)
     elif sport_key == "swimming":
         steps = _parse_swim_steps(plan_lines)
         if not steps:
