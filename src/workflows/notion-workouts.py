@@ -21,7 +21,7 @@ DONE_PROPERTY = "Terminé"
 LOOKAHEAD_DAYS = max(1, min(int(os.getenv("GARMIN_WORKOUTS_LOOKAHEAD_DAYS", "14")), 90))
 PAGE_MARKER_LENGTH = 16
 HASH_LENGTH = 8
-SYNC_TAG = re.compile(r"\[NTN:([a-f0-9]{16}):([a-f0-9]{8})(?::(P|S|C))?\]$", re.IGNORECASE)
+SYNC_TAG = re.compile(r"\[NTN:([a-f0-9]{16}):([a-f0-9]{8})(?::(P|S|C|F))?\]$", re.IGNORECASE)
 
 SPORT_TYPES = {
     "running": {"sportTypeId": 1, "sportTypeKey": "running", "displayOrder": 1},
@@ -1126,6 +1126,24 @@ def all_garmin_workouts(garmin: Garmin) -> list[dict[str, Any]]:
     return workouts
 
 
+def _remove_legacy_text_overflow(steps: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    cleaned: list[dict[str, Any]] = []
+    removed = 0
+    for step in steps:
+        if step.get("type") == "RepeatGroupDTO":
+            children, child_count = _remove_legacy_text_overflow(
+                step.get("workoutSteps", [])
+            )
+            step["workoutSteps"] = children
+            removed += child_count
+        description = str(step.get("description") or "").strip().casefold()
+        if description.startswith("suite du texte notion ("):
+            removed += 1
+            continue
+        cleaned.append(step)
+    return cleaned, removed
+
+
 def clear_synced_workout_notes(
     garmin: Garmin,
     existing_workouts: list[dict[str, Any]],
@@ -1136,7 +1154,7 @@ def clear_synced_workout_notes(
         tag = SYNC_TAG.search(workout_name)
         if (
             not tag
-            or tag.group(3) == "C"
+            or tag.group(3) == "F"
             or tag.group(1).casefold() in upcoming_page_markers
         ):
             continue
@@ -1149,17 +1167,27 @@ def clear_synced_workout_notes(
                 continue
             description = str(workout.get("description") or "")
             workout["description"] = ""
+            removed_steps = 0
+            for segment in workout.get("workoutSegments", []):
+                cleaned_steps, removed = _remove_legacy_text_overflow(
+                    segment.get("workoutSteps", [])
+                )
+                segment["workoutSteps"] = cleaned_steps
+                removed_steps += removed
             clean_name = (
                 workout_name[:tag.start()]
-                + f"[NTN:{tag.group(1)}:{tag.group(2)}:C]"
+                + f"[NTN:{tag.group(1)}:{tag.group(2)}:F]"
             )
             workout["workoutName"] = clean_name
             garmin.update_workout(workout_id, workout)
-            if description.strip():
+            if description.strip() or removed_steps:
                 garmin.push_workout_to_device(workout_id=workout_id)
             existing["workoutName"] = clean_name
-            if description.strip():
-                print(f"Notes Garmin supprimées : « {workout_name} ».")
+            if description.strip() or removed_steps:
+                print(
+                    f"Notes Garmin et texte de débordement supprimés : "
+                    f"« {workout_name} » ({removed_steps} étape(s) retirée(s))."
+                )
         except Exception as error:
             print(f"Impossible de vider les notes de « {workout_name} » : {error}")
 
