@@ -14,7 +14,7 @@ Les autres synchronisations du projet source (records personnels, pas et sommeil
 
 ## Préparer un entraînement Notion sur la montre Garmin
 
-Notion reste l'endroit où tu écris le programme. Toutes les 15 minutes, GitHub Actions cherche dans « Journal d'entraînement » les séances prévues aujourd'hui ou dans les 14 jours, qui ne sont pas cochées « Terminé ». Le programme lit le champ « Discipline » et prépare un entraînement Garmin dès qu'il trouve du texte dans la page. Le titre devient le nom de l'entraînement. Le texte du contenu de la page et des propriétés textuelles ou à choix (dont « Source ») est conservé dans la description Garmin jusqu'à 1 000 caractères ; si le texte dépasse cette limite, la suite est ajoutée comme des étapes de note manuelles à la fin. Les lignes reconnues créent aussi les étapes propres au sport. L'affichage des notes dépend du modèle de montre.
+Notion reste l'endroit où tu écris le programme. Toutes les 15 minutes, GitHub Actions cherche dans « Journal d'entraînement » les séances prévues aujourd'hui ou dans les 14 jours, qui ne sont pas cochées « Terminé ». Le programme lit le champ « Discipline » et transforme les consignes du contenu de la page en étapes Garmin. Chaque étape affiche le nom de l'exercice ou de l'allure dans ses notes ; le texte explicatif qui suit une consigne y est ajouté aussi. Les durées explicites sont chronométrées ; une consigne sans durée attend que tu appuies sur le bouton Lap. Les rubriques de contexte comme « Source », les objectifs et le bilan ne sont pas recopiées dans les notes générales Garmin, qui restent vides. Au prochain passage, les notes générales des entraînements déjà synchronisés depuis Notion sont également supprimées.
 
 Les disciplines de ta base sont prises en compte : course à pied, vélo, natation, renforcement, haut/bas/tout le corps, yoga, mobilité, étirements, gymnastique, marche/randonnée, ski de fond et escalade. Les séances de repos et de massage sont ignorées. Garmin Connect ne proposant pas de type d'entraînement personnalisé dédié à la marche/randonnée, au ski de fond et à l'escalade dans cette intégration, ces trois disciplines sont envoyées comme séances génériques « Autre ».
 
@@ -47,3 +47,4 @@ Les champs subjectifs (qualité, douleur, charge mentale, énergie après 24 h),
 Après avoir cloné ce dépôt et installé uv : `uv sync`, puis définir les variables d'environnement listées ci-dessus et lancer `uv run python -m src.workflows.garmin-activities`.
 
 Licence : MIT. Le code source original conserve son attribution dans [LICENSE](LICENSE).
+
