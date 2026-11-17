@@ -22,6 +22,7 @@ CHART_COLORS = {
     "speed": "#3b82f6",
     "heart_rate": "#ef4444",
     "cadence": "#f97316",
+    "power": "#8b5cf6",
 }
 REPORT_TITLE = "Bilan de la séance"
 PAGES_BASE_URL = os.getenv(
@@ -477,6 +478,10 @@ def render_activity_report(
     )
     if heart_rate:
         charts.append(("Fréquence cardiaque", heart_rate, "bpm", CHART_COLORS["heart_rate"], False))
+
+    power = _series(samples, times, ("directPower", "power"), positive_only=True)
+    if power:
+        charts.append(("Puissance", power, "W", CHART_COLORS["power"], False))
 
     cadence_keys = (
         ("directBikeCadence", "directCadence", "bikeCadence")
