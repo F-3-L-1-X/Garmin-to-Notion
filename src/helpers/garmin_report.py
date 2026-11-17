@@ -621,13 +621,9 @@ def find_activity_report_page(
 
 
 def _report_container(notion: NotionClient, page_id: str) -> str:
-    for block in _children(notion, page_id):
-        block_type = block.get("type", "")
-        payload = block.get(block_type, {})
-        if _block_text(block).casefold() != REPORT_TITLE.casefold():
-            continue
-        if block_type == "toggle" or payload.get("is_toggleable"):
-            return block["id"]
+    existing = _choose_report_container(notion, page_id)
+    if existing:
+        return existing["block"]["id"]
 
     response = notion.blocks.children.append(
         block_id=page_id,
@@ -694,14 +690,8 @@ def _report_container_children(
     notion: NotionClient,
     page_id: str,
 ) -> list[dict]:
-    for block in _children(notion, page_id):
-        block_type = block.get("type", "")
-        payload = block.get(block_type, {})
-        if _block_text(block).casefold() != REPORT_TITLE.casefold():
-            continue
-        if block_type == "toggle" or payload.get("is_toggleable"):
-            return _children(notion, block["id"])
-    return []
+    selected = _choose_report_container(notion, page_id)
+    return selected["children"] if selected else []
 
 
 def page_has_interactive_report(
@@ -715,19 +705,35 @@ def page_has_interactive_report(
     )
 
 
+def _activity_report_child_ids(children: list[dict], activity_id: str) -> set[str]:
+    selected = set()
+    marker = _report_marker(activity_id)
+    for index, child in enumerate(children):
+        if child.get("type") == "paragraph" and marker in _block_text(child):
+            selected.add(child["id"])
+            if index + 1 < len(children) and children[index + 1].get("type") == "embed":
+                selected.add(children[index + 1]["id"])
+        elif _legacy_pages_embed(child, activity_id) or _legacy_activity_image(child, activity_id):
+            selected.add(child["id"])
+    return selected
+
+
 def page_has_activity_report(
     notion: NotionClient,
     page_id: str,
     activity_id: str,
 ) -> bool:
-    children = _report_container_children(notion, page_id)
-    if _has_private_report_marker(children, activity_id):
-        return True
-    return any(
-        _legacy_pages_embed(child, activity_id)
-        or _legacy_activity_image(child, activity_id)
-        for child in children
-    )
+    for container in _find_report_containers(notion, page_id):
+        children = container["children"]
+        if _has_private_report_marker(children, activity_id):
+            return True
+        if any(
+            _legacy_pages_embed(child, activity_id)
+            or _legacy_activity_image(child, activity_id)
+            for child in children
+        ):
+            return True
+    return False
 
 
 def add_or_update_activity_report(
@@ -756,16 +762,21 @@ def add_or_update_activity_report(
         raise RuntimeError("Notion n’a pas terminé l’envoi du bilan HTML.")
 
     container_id = _report_container(notion, page_id)
-    for child in _children(notion, container_id):
-        if (
-            _legacy_pages_embed(child, activity_id)
-            or _legacy_activity_image(child, activity_id)
-            or (
-                child.get("type") == "paragraph"
-                and _report_marker(activity_id) in _block_text(child)
-            )
-        ):
-            notion.blocks.delete(block_id=child["id"])
+    for container in _find_report_containers(notion, page_id):
+        children = container["children"]
+        report_child_ids = _activity_report_child_ids(children, activity_id)
+        if not report_child_ids:
+            continue
+        if container["block"]["id"] != container_id:
+            remaining = [
+                child for child in children
+                if child["id"] not in report_child_ids
+            ]
+            if not remaining:
+                notion.blocks.delete(block_id=container["block"]["id"])
+                continue
+        for child_id in report_child_ids:
+            notion.blocks.delete(block_id=child_id)
 
     marker = _report_marker(activity_id)
     label = f"Bilan Garmin — {activity_name[:120]} · "
