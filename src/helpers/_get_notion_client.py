@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from notion_client import Client
 
-NOTION_VERSION = "2025-09-03"
+NOTION_VERSION = "2026-03-11"
 
 
 @dataclass(frozen=True)

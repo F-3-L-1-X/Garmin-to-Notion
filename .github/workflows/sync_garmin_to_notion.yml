@@ -22,19 +22,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
       - name: Install dependencies
         run: uv sync
-      - name: Préparer le site des bilans Garmin
-        run: uv run python -c "from src.helpers.garmin_report import prepare_report_site; prepare_report_site()"
       - name: Envoyer les entraînements prévus sur la montre
         env:
           GARMIN_AUTH_TOKEN: ${{ secrets.GARMIN_AUTH_TOKEN }}
@@ -52,12 +45,3 @@ jobs:
           NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
           GARMIN_ACTIVITIES_FETCH_LIMIT: ${{ inputs.GARMIN_ACTIVITIES_FETCH_LIMIT || '10' }}
         run: uv run python -m src.workflows.garmin-activities
-      - name: Configurer GitHub Pages
-        uses: actions/configure-pages@v5
-      - name: Préparer le site publié
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-      - name: Publier les bilans interactifs
-        id: deployment
-        uses: actions/deploy-pages@v4

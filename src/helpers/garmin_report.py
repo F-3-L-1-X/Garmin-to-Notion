@@ -3,15 +3,12 @@ from __future__ import annotations
 from html import escape
 from datetime import datetime, timedelta
 import json
+from io import BytesIO
 import math
-import os
-from pathlib import Path
 import re
 from statistics import fmean
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urljoin
-from urllib.request import urlopen
+from urllib.parse import urlsplit
 
 from notion_client import Client as NotionClient
 
@@ -25,118 +22,6 @@ CHART_COLORS = {
     "power": "#8b5cf6",
 }
 REPORT_TITLE = "Bilan de la séance"
-PAGES_BASE_URL = os.getenv(
-    "GARMIN_REPORTS_BASE_URL",
-    "https://f-3-l-1-x.github.io/Garmin-to-Notion/",
-).rstrip("/") + "/"
-REPORTS_DIR = Path("site/reports")
-REPORTS_INDEX = REPORTS_DIR / "index.json"
-
-
-
-def _write_report_site_index(manifest: dict[str, Any]) -> None:
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    reports = sorted(
-        manifest.get("reports", []),
-        key=lambda item: (item.get("title", "").casefold(), item.get("id", "")),
-    )
-    REPORTS_INDEX.write_text(
-        json.dumps({"reports": reports}, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    entries = "".join(
-        '<li><a href="reports/'
-        + quote(item["filename"], safe="")
-        + '">'
-        + escape(item.get("title", "Séance Garmin"))
-        + "</a></li>"
-        for item in reports
-    )
-    if not entries:
-        entries = "<li>Les premiers bilans interactifs apparaîtront ici après une séance Garmin.</li>"
-    page = """<!doctype html>
-<html lang="fr">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bilans Garmin</title>
-<style>
-body{font:16px/1.5 system-ui,sans-serif;max-width:860px;margin:3rem auto;padding:0 1.2rem;background:#f8fafc;color:#0f172a}
-h1{font-size:2rem}li{margin:.8rem 0}a{color:#1d4ed8}
-</style>
-</head>
-<body>
-<h1>Bilans interactifs Garmin</h1>
-<p>Chaque bilan contient les courbes disponibles et les zones d’entraînement Garmin.</p>
-<ul>__ENTRIES__</ul>
-</body>
-</html>
-""".replace("__ENTRIES__", entries)
-    (REPORTS_DIR.parent / "index.html").write_text(page, encoding="utf-8")
-    (REPORTS_DIR.parent / ".nojekyll").write_text("", encoding="utf-8")
-
-
-def prepare_report_site() -> None:
-    """Restore prior published reports and prepare the Pages artifact directory."""
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    manifest: dict[str, Any] = {"reports": []}
-    if REPORTS_INDEX.exists():
-        try:
-            manifest = json.loads(REPORTS_INDEX.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            manifest = {"reports": []}
-    else:
-        try:
-            with urlopen(urljoin(PAGES_BASE_URL, "reports/index.json"), timeout=20) as response:
-                manifest = json.loads(response.read().decode("utf-8"))
-        except HTTPError as error:
-            if error.code != 404:
-                raise RuntimeError("Impossible de lire l’index public des bilans Garmin.") from error
-        except URLError as error:
-            raise RuntimeError("Impossible de contacter le site public des bilans Garmin.") from error
-
-    available_reports = []
-    for item in manifest.get("reports", []):
-        filename = str(item.get("filename", ""))
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}\.html", filename):
-            continue
-        target = REPORTS_DIR / filename
-        if target.exists():
-            available_reports.append(item)
-            continue
-        try:
-            with urlopen(
-                urljoin(PAGES_BASE_URL, "reports/" + quote(filename, safe="")),
-                timeout=20,
-            ) as response:
-                target.write_bytes(response.read())
-            available_reports.append(item)
-        except HTTPError as error:
-            if error.code != 404:
-                raise RuntimeError(f"Impossible de restaurer le bilan publié « {filename} ».") from error
-        except URLError as error:
-            raise RuntimeError(f"Impossible de restaurer le bilan publié « {filename} ».") from error
-    manifest = {"reports": available_reports}
-
-    _write_report_site_index(manifest)
-
-
-def _save_activity_report(activity_id: str, activity_name: str, html: bytes) -> str:
-    prepare_report_site()
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", activity_id):
-        raise ValueError("Identifiant Garmin invalide pour le bilan interactif.")
-    filename = f"{activity_id}.html"
-    (REPORTS_DIR / filename).write_bytes(html)
-    try:
-        manifest = json.loads(REPORTS_INDEX.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        manifest = {"reports": []}
-    report = {"id": activity_id, "title": activity_name, "filename": filename}
-    reports = [item for item in manifest.get("reports", []) if item.get("id") != activity_id]
-    reports.append(report)
-    _write_report_site_index({"reports": reports})
-    return urljoin(PAGES_BASE_URL, "reports/" + quote(filename, safe=""))
-
 def _number(value: Any) -> float | None:
     try:
         result = float(value)
@@ -760,8 +645,17 @@ def _report_container(notion: NotionClient, page_id: str) -> str:
     return response["results"][0]["id"]
 
 
-def _report_embed_url(activity_id: str) -> str:
-    return urljoin(PAGES_BASE_URL, "reports/" + quote(activity_id, safe="") + ".html")
+def _report_marker(activity_id: str) -> str:
+    return f"garmin-activity-id:{activity_id}"
+
+
+def _legacy_pages_embed(child: dict, activity_id: str) -> bool:
+    if child.get("type") != "embed":
+        return False
+    url = child.get("embed", {}).get("url", "")
+    return urlsplit(url).path.rstrip("/").endswith(
+        f"/reports/{activity_id}.html"
+    )
 
 
 def _legacy_activity_image(child: dict, activity_id: str) -> bool:
@@ -782,23 +676,43 @@ def _legacy_activity_image(child: dict, activity_id: str) -> bool:
     )
 
 
-def page_has_interactive_report(
+def _has_private_report_marker(children: list[dict], activity_id: str) -> bool:
+    marker = _report_marker(activity_id)
+    for index, child in enumerate(children[:-1]):
+        if child.get("type") != "paragraph" or marker not in _block_text(child):
+            continue
+        next_child = children[index + 1]
+        if next_child.get("type") != "embed":
+            continue
+        embed = next_child.get("embed", {})
+        if embed.get("url") or embed.get("file_upload", {}).get("id"):
+            return True
+    return False
+
+
+def _report_container_children(
     notion: NotionClient,
     page_id: str,
-    activity_id: str,
-) -> bool:
-    expected_url = _report_embed_url(activity_id)
+) -> list[dict]:
     for block in _children(notion, page_id):
         block_type = block.get("type", "")
         payload = block.get(block_type, {})
         if _block_text(block).casefold() != REPORT_TITLE.casefold():
             continue
-        if block_type != "toggle" and not payload.get("is_toggleable"):
-            continue
-        for child in _children(notion, block["id"]):
-            if child.get("type") == "embed" and child.get("embed", {}).get("url") == expected_url:
-                return True
-    return False
+        if block_type == "toggle" or payload.get("is_toggleable"):
+            return _children(notion, block["id"])
+    return []
+
+
+def page_has_interactive_report(
+    notion: NotionClient,
+    page_id: str,
+    activity_id: str,
+) -> bool:
+    return _has_private_report_marker(
+        _report_container_children(notion, page_id),
+        activity_id,
+    )
 
 
 def page_has_activity_report(
@@ -806,21 +720,15 @@ def page_has_activity_report(
     page_id: str,
     activity_id: str,
 ) -> bool:
-    expected_url = _report_embed_url(activity_id)
-    for block in _children(notion, page_id):
-        block_type = block.get("type", "")
-        payload = block.get(block_type, {})
-        if _block_text(block).casefold() != REPORT_TITLE.casefold():
-            continue
-        if block_type != "toggle" and not payload.get("is_toggleable"):
-            continue
-        for child in _children(notion, block["id"]):
-            if (
-                child.get("type") == "embed"
-                and child.get("embed", {}).get("url") == expected_url
-            ) or _legacy_activity_image(child, activity_id):
-                return True
-    return False
+    children = _report_container_children(notion, page_id)
+    if _has_private_report_marker(children, activity_id):
+        return True
+    return any(
+        _legacy_pages_embed(child, activity_id)
+        or _legacy_activity_image(child, activity_id)
+        for child in children
+    )
+
 
 def add_or_update_activity_report(
     notion: NotionClient,
@@ -829,21 +737,60 @@ def add_or_update_activity_report(
     html: bytes,
     activity_name: str = "Séance Garmin",
 ) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", activity_id):
+        raise ValueError("Identifiant Garmin invalide pour le bilan interactif.")
     if page_has_interactive_report(notion, page_id, activity_id):
         return
 
-    report_url = _save_activity_report(activity_id, activity_name, html)
+    filename = f"garmin-{activity_id}-bilan.html"
+    upload_request = notion.file_uploads.create(
+        mode="single_part",
+        filename=filename,
+        content_type="text/html",
+    )
+    upload = notion.file_uploads.send(
+        file_upload_id=upload_request["id"],
+        file=(filename, BytesIO(html), "text/html"),
+    )
+    if upload.get("status") != "uploaded":
+        raise RuntimeError("Notion n’a pas terminé l’envoi du bilan HTML.")
+
     container_id = _report_container(notion, page_id)
     for child in _children(notion, container_id):
-        if _legacy_activity_image(child, activity_id):
+        if (
+            _legacy_pages_embed(child, activity_id)
+            or _legacy_activity_image(child, activity_id)
+            or (
+                child.get("type") == "paragraph"
+                and _report_marker(activity_id) in _block_text(child)
+            )
+        ):
             notion.blocks.delete(block_id=child["id"])
 
+    marker = _report_marker(activity_id)
+    label = f"Bilan Garmin — {activity_name[:120]} · "
     notion.blocks.children.append(
         block_id=container_id,
         children=[
             {
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [
+                        {"type": "text", "text": {"content": label}},
+                        {
+                            "type": "text",
+                            "text": {"content": marker},
+                            "annotations": {"code": True},
+                        },
+                    ]
+                },
+            },
+            {
                 "type": "embed",
-                "embed": {"url": report_url},
-            }
+                "embed": {
+                    "type": "file_upload",
+                    "file_upload": {"id": upload["id"]},
+                },
+            },
         ],
     )
