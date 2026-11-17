@@ -9,6 +9,7 @@ from src.helpers import get_garmin_client, get_notion_client
 from src.helpers.garmin_report import (
     add_or_update_activity_report,
     find_activity_report_page,
+    page_has_interactive_report,
     render_activity_report,
 )
 from src.helpers.garmin_route import ROUTE_PROPERTY, add_activity_gpx, page_has_activity_gpx
@@ -286,7 +287,10 @@ def main():
 
         if already_reported:
             page = already_reported
-            print(f"Bilan Garmin déjà présent : {_page_title(page)}")
+            if page_has_interactive_report(notion, page["id"], activity_id):
+                print(f"Bilan interactif Garmin déjà présent : {_page_title(page)}")
+            else:
+                print(f"Conversion du bilan existant en graphiques interactifs : {_page_title(page)}")
         else:
             planned = find_planned_session(
                 notion,
@@ -336,7 +340,7 @@ def main():
                     else:
                         print(f"Parcours GPX déjà présent : {name}")
 
-        if already_reported:
+        if already_reported and page_has_interactive_report(notion, page["id"], activity_id):
             continue
 
         try:
@@ -368,8 +372,8 @@ def main():
             print(f"Pas de courbe Garmin exploitable pour « {name} » ; bilan non ajouté.")
             continue
 
-        add_or_update_activity_report(notion, page["id"], activity_id, report)
-        print(f"Bilan graphique ajouté dans Notion : {name}")
+        add_or_update_activity_report(notion, page["id"], activity_id, report, name)
+        print(f"Bilan interactif Garmin ajouté dans Notion : {name}")
 
 
 if __name__ == "__main__":

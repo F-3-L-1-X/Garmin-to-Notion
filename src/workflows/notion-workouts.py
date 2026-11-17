@@ -61,12 +61,13 @@ EXERCISE_LINE = re.compile(
     r"(?:\s*[—–-]\s*(?P<reference>\d+))?$",
     re.IGNORECASE,
 )
-ATELIER_HEADER = re.compile(r"^(?:atelier\s+\d+\b|emom\b.*)", re.IGNORECASE)
+ATELIER_HEADER = re.compile(r"^(?:atelier(?:\s+\d+)?\b.*|(?:emom|emon)\b.*|(?:échauffement|echauffement|warm[ -]?up|mise en selle|retour au calme|cooldown|séance principale|seance principale|séance|seance)\b.*)$", re.IGNORECASE)
+REVERSED_EXERCISE_LINE = re.compile(r"^(?P<name>.+?)\s*[x×]\s*(?P<reps>\d+(?:/\d+)?)$", re.IGNORECASE)
 SETS_LINE = re.compile(r"^s(?:é|e)ries?\s*[:：]\s*(\d+)\b", re.IGNORECASE)
 NOTE_LINE = re.compile(r"^(?:notes?|remarques?)\s*[:：]\s*(.*)$", re.IGNORECASE)
-EMOM_DURATION = re.compile(r"\bemom\b.*?(\d+)\s*(?:min|minutes|mn)\b", re.IGNORECASE)
+EMOM_DURATION = re.compile(r"\bem(?:om|on)\b.*?(\d+)\s*(?:min|minutes|mn)\b", re.IGNORECASE)
 REST_TIME = re.compile(
-    r"(?P<amount>\d+(?:[,.]\d+)?)\s*(?P<unit>minutes?|mins?|mn|secondes?|secs?|s)\b",
+    r"""(?P<amount>\d+(?:[,.]\d+)?)\s*(?P<unit>minutes?|mins?|mn\b|secondes?|secs?|s\b|[’'′]{2}|["”“″]|[’'′])""",
     re.IGNORECASE,
 )
 
@@ -308,7 +309,11 @@ def _plan_section_kind(line: str) -> str | None:
     normalized = normalize_name(line.strip().rstrip(":： "))
     if normalized.startswith(("echauffement", "warmup", "miseenselle")):
         return "warmup"
-    if normalized.startswith(("cardio", "seance", "entrainement", "fractionne", "atelier", "emom")):
+    if normalized.startswith(("retouraucalme", "cooldown")):
+        return "cooldown"
+    if normalized.startswith(("recuperation", "repos")):
+        return "recovery"
+    if normalized.startswith(("cardio", "seance", "entrainement", "fractionne", "atelier", "emom", "emon")):
         return "interval"
     return None
 
@@ -335,13 +340,29 @@ def _parse_rest_seconds(line: str) -> int | None:
         return None
     raw = match.group("amount").replace(",", ".")
     unit = match.group("unit").casefold()
-    if unit.startswith(("min", "mn")):
+    if unit.startswith(("min", "mn")) or unit in {"’", "'", "′"}:
         if "." in raw:
             whole, fraction = raw.split(".", 1)
             if len(fraction) == 2:
                 return int(whole) * 60 + int(fraction)
         return round(float(raw) * 60)
     return round(float(raw))
+
+
+def _section_item_summary(item: dict[str, Any]) -> str:
+    if item.get("kind") == "reps":
+        return f"{item['reps']} x {item['name']}"
+    return item.get("description", "").strip()
+
+
+def _section_summary(section: dict[str, Any]) -> str:
+    items = [
+        summary
+        for summary in (_section_item_summary(item) for item in section["exercises"])
+        if summary
+    ]
+    details = " · ".join(items)
+    return f"{section['title']} — {details}" if details else section["title"]
 
 
 def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
@@ -351,21 +372,26 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
     collecting_note = False
 
     def save_section() -> None:
-        if current and current["exercises"]:
+        if current and (current["exercises"] or current["rest_seconds"] is not None):
             duration_match = EMOM_DURATION.search(current["title"])
             rounds = current["sets"]
             if rounds is None:
                 rounds = int(duration_match.group(1)) if duration_match else 1
             current["rounds"] = max(1, rounds)
             current["notes"] = " ".join(current["notes"]).strip()
+            current["summary"] = _section_summary(current)
             sections.append(current)
 
     for raw_line in lines:
         line = re.sub(r"^(?:[-*•]\s+|[☐☑]\s*)", "", raw_line).strip()
-        if ATELIER_HEADER.match(line):
+        recovery_header = bool(
+            re.match(r"^(?:récupération|recuperation|repos)\b", line, re.IGNORECASE)
+            and not DURATION_TOKEN.search(line)
+        )
+        if ATELIER_HEADER.match(line) or recovery_header:
             save_section()
             current = {
-                "title": line,
+                "title": line.rstrip(":： "),
                 "sets": None,
                 "rest_seconds": None,
                 "exercises": [],
@@ -377,6 +403,11 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
         if current is None:
             continue
 
+        if _is_source_line(line):
+            current_exercise = None
+            collecting_note = False
+            continue
+
         set_match = SETS_LINE.match(line)
         if set_match:
             current["sets"] = int(set_match.group(1))
@@ -384,7 +415,7 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
             collecting_note = False
             continue
 
-        if re.match(r"^récupération\s*[:：]", line, re.IGNORECASE):
+        if re.match(r"^(?:récupération|recuperation|repos)\s*(?:[:：]\s*)?", line, re.IGNORECASE):
             current["rest_seconds"] = _parse_rest_seconds(line)
             current_exercise = None
             collecting_note = False
@@ -401,6 +432,7 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
         exercise_match = EXERCISE_LINE.match(line)
         if exercise_match:
             current_exercise = {
+                "kind": "reps",
                 "reps": int(exercise_match.group("reps")),
                 "name": exercise_match.group("name").strip(),
                 "reference": exercise_match.group("reference"),
@@ -410,17 +442,52 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
             collecting_note = False
             continue
 
+        reversed_exercise = REVERSED_EXERCISE_LINE.match(line)
+        if reversed_exercise:
+            reps_text = reversed_exercise.group("reps")
+            if "/" in reps_text:
+                item = {"kind": "manual", "description": line, "explanation": []}
+            else:
+                item = {
+                    "kind": "reps",
+                    "reps": int(reps_text),
+                    "name": reversed_exercise.group("name").strip(),
+                    "reference": None,
+                    "explanation": [],
+                }
+            current["exercises"].append(item)
+            current_exercise = item
+            collecting_note = False
+            continue
+
+        duration_match = DURATION_TOKEN.search(line)
+        if duration_match:
+            item = {
+                "kind": "time",
+                "description": line,
+                "duration_seconds": _duration_seconds(duration_match),
+                "explanation": [],
+            }
+            current["exercises"].append(item)
+            current_exercise = item
+            collecting_note = False
+            continue
+
         if collecting_note:
             current["notes"].append(line)
         elif current_exercise is not None:
             current_exercise["explanation"].append(line)
+        elif line and not re.match(r"^(?:objectif|discipline|source)\b", line, re.IGNORECASE):
+            item = {"kind": "manual", "description": line, "explanation": []}
+            current["exercises"].append(item)
+            current_exercise = item
+            collecting_note = False
 
     save_section()
     return sections
 
-
 DURATION_TOKEN = re.compile(
-    r"(?P<amount>\d+(?:[,.]\d+)?)\s*(?P<unit>minutes?|mins?|mn|secondes?|secs?|s\b|[’'′])\s*"
+    r"""(?P<amount>\d+(?:[,.]\d+)?)\s*(?P<unit>minutes?|mins?|mn\b|secondes?|secs?|s\b|[’'′]{2}|["”“″]|[’'′])\s*"""
     r"(?P<label>[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ_-]*)?",
     re.IGNORECASE,
 )
@@ -439,7 +506,7 @@ def _fold_text(value: str) -> str:
 def _duration_seconds(match: re.Match[str]) -> int:
     amount = float(match.group("amount").replace(",", "."))
     unit = match.group("unit").casefold()
-    if unit.startswith(("min", "mn", "’", "'", "′")):
+    if unit.startswith(("min", "mn")) or unit in {"’", "'", "′"}:
         return max(1, round(amount * 60))
     return max(1, round(amount))
 
@@ -631,6 +698,7 @@ def _parse_cardio_steps(lines: list[str], sport_key: str) -> list[dict[str, Any]
     steps: list[dict[str, Any]] = []
     order = 1
     section_kind = "interval"
+    section_title = ""
     last_instruction_steps: list[dict[str, Any]] = []
     for raw_line in lines:
         list_item = _is_list_item(raw_line)
@@ -640,6 +708,7 @@ def _parse_cardio_steps(lines: list[str], sport_key: str) -> list[dict[str, Any]
         header_kind = _plan_section_kind(line)
         if header_kind:
             section_kind = header_kind
+            section_title = line.rstrip(":： ")
             last_instruction_steps = []
             continue
         if _is_plan_heading(line) or _is_cycle_marker(line) or _is_source_line(line):
@@ -647,7 +716,8 @@ def _parse_cardio_steps(lines: list[str], sport_key: str) -> list[dict[str, Any]
         items = _cardio_tokens(line, sport_key, section_kind)
         if not items:
             if list_item or _is_explicit_instruction(line) or not last_instruction_steps:
-                step = _time_or_manual_step(order, line, None, section_kind)
+                description = f"{section_title} · {line}" if section_title else line
+                step = _time_or_manual_step(order, description, None, section_kind)
                 steps.append(step)
                 last_instruction_steps = [step]
                 order += 1
@@ -661,22 +731,38 @@ def _parse_cardio_steps(lines: list[str], sport_key: str) -> list[dict[str, Any]
                 children = [
                     _time_or_manual_step(
                         index,
-                        child["description"],
+                        f"{section_title} · {child['description']}" if section_title else child["description"],
                         child["duration_seconds"],
                         child["kind"],
                     )
                     for index, child in enumerate(item["steps"], start=1)
                 ]
+                group_note = section_title
+                if children:
+                    details = " · ".join(
+                        child["description"].split(" · ", 1)[-1]
+                        for child in children
+                    )
+                    group_note = f"{section_title} — {details}" if section_title else details
                 group = _repeat_group(
-                    max(1, item["repeat"]), children, order, skip_last_rest=False
+                    max(1, item["repeat"]),
+                    children,
+                    order,
+                    skip_last_rest=False,
+                    description=group_note or None,
                 )
                 steps.append(group)
                 current_instruction_steps.append(group)
                 order += len(children) + 2
             else:
+                description = (
+                    f"{section_title} · {item['description']}"
+                    if section_title
+                    else item["description"]
+                )
                 step = _time_or_manual_step(
                     order,
-                    item["description"],
+                    description,
                     item["duration_seconds"],
                     item["kind"],
                 )
@@ -685,12 +771,11 @@ def _parse_cardio_steps(lines: list[str], sport_key: str) -> list[dict[str, Any]
                 order += 1
         last_instruction_steps = current_instruction_steps
     return steps
-
-
 def _parse_swim_steps(lines: list[str]) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
     order = 1
     section_kind = "interval"
+    section_title = ""
     last_instruction_steps: list[dict[str, Any]] = []
     for raw_line in lines:
         list_item = _is_list_item(raw_line)
@@ -698,12 +783,15 @@ def _parse_swim_steps(lines: list[str]) -> list[dict[str, Any]]:
         normalized = normalize_name(line)
         if "echauffement" in normalized:
             section_kind = "warmup"
+            section_title = line.rstrip(":： ")
             last_instruction_steps = []
         elif "retouraucalme" in normalized:
             section_kind = "cooldown"
+            section_title = line.rstrip(":： ")
             last_instruction_steps = []
         elif "seanceprincipale" in normalized or normalized == "seance":
             section_kind = "interval"
+            section_title = line.rstrip(":： ")
             last_instruction_steps = []
 
         if _is_plan_heading(line) or _is_source_line(line) or _is_cycle_marker(line):
@@ -711,19 +799,21 @@ def _parse_swim_steps(lines: list[str]) -> list[dict[str, Any]]:
 
         match = SWIM_LINE.match(line)
         if match:
+            description = f"{section_title} · {match.group('stroke').strip()} · {line}" if section_title else f"{match.group('stroke').strip()} · {line}"
             step = _distance_step(
                 order,
                 int(match.group("distance")),
-                f"{match.group('stroke').strip()} · {line}",
+                description,
                 section_kind,
             )
             steps.append(step)
             last_instruction_steps = [step]
             order += 1
-        elif re.match(r"^repos\s*[:：]", line, re.IGNORECASE) and steps:
+        elif re.match(r"^repos\s*[:：]?", line, re.IGNORECASE) and steps:
             seconds = _parse_rest_seconds(line)
             if seconds:
-                step = _time_or_manual_step(order, line, seconds, "recovery")
+                description = f"{section_title} · {line}" if section_title else line
+                step = _time_or_manual_step(order, description, seconds, "recovery")
                 steps.append(step)
                 last_instruction_steps = [step]
                 order += 1
@@ -731,22 +821,23 @@ def _parse_swim_steps(lines: list[str]) -> list[dict[str, Any]]:
             for step in last_instruction_steps:
                 _append_step_explanation(step, line)
         elif list_item:
-            step = _time_or_manual_step(order, line, None, section_kind)
+            description = f"{section_title} · {line}" if section_title else line
+            step = _time_or_manual_step(order, description, None, section_kind)
             steps.append(step)
             last_instruction_steps = [step]
             order += 1
     return steps
-
-
 def _numbered_routine_steps(lines: list[str]) -> list[dict[str, Any]]:
     items: list[dict[str, str]] = []
     current: dict[str, str] | None = None
     active = False
+    section_title = ""
     for raw_line in lines:
         line = _clean_plan_line(raw_line)
         normalized = normalize_name(line)
         if _is_plan_heading(line):
             active = True
+            section_title = line.rstrip(":： ")
             continue
         if re.match(r"^(?:retouraucalme|bilandelaseance|bilan)\b", normalized):
             if current:
@@ -786,10 +877,10 @@ def _numbered_routine_steps(lines: list[str]) -> list[dict[str, Any]]:
         ))
         if len(durations) == 1 and not complex_timing:
             duration = _duration_seconds(durations[0])
+        if section_title:
+            description = f"{section_title} · {description}"
         steps.append(_time_or_manual_step(order, description, duration))
     return steps
-
-
 def _split_text_chunks(value: str, limit: int = 450) -> list[str]:
     remaining = value
     chunks: list[str] = []
@@ -811,13 +902,17 @@ def _split_text_chunks(value: str, limit: int = 450) -> list[str]:
 def _generic_prompt_steps(lines: list[str]) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
     last_instruction_steps: list[dict[str, Any]] = []
+    section_title = ""
     for raw_line in lines:
         list_item = _is_list_item(raw_line)
         line = _clean_plan_line(raw_line)
         normalized = normalize_name(line)
+        if _is_plan_heading(line):
+            section_title = line.rstrip(":： ")
+            last_instruction_steps = []
+            continue
         if (
             not line
-            or _is_plan_heading(line)
             or _is_source_line(line)
             or _is_cycle_marker(line)
             or normalized in {"retouraucalme", "seanceprincipale"}
@@ -835,7 +930,8 @@ def _generic_prompt_steps(lines: list[str]) -> list[dict[str, Any]]:
         current_instruction_steps: list[dict[str, Any]] = []
         for index, chunk in enumerate(_split_text_chunks(line), start=1):
             chunk_duration = duration if index == 1 else None
-            step = _time_or_manual_step(len(steps) + 1, chunk, chunk_duration)
+            description = f"{section_title} · {chunk}" if section_title else chunk
+            step = _time_or_manual_step(len(steps) + 1, description, chunk_duration)
             steps.append(step)
             current_instruction_steps.append(step)
         last_instruction_steps = current_instruction_steps
@@ -862,7 +958,7 @@ def _generic_workout(
 ) -> tuple[dict[str, Any], str]:
     page_marker = page_id.replace("-", "").casefold()[:PAGE_MARKER_LENGTH]
     digest = hashlib.sha256(
-        ("structured-workout-v3\n" + title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
+        ("structured-workout-v4\n" + title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
     ).hexdigest()[:HASH_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
     if not steps:
@@ -971,12 +1067,11 @@ def _exercise_step(
     reference = f" · Réf. {item['reference']}" if item.get("reference") else ""
     explanation = " — " + " ".join(item.get("explanation", [])) if item.get("explanation") else ""
     note = f" · {section['notes']}" if section.get("notes") else ""
-    emom = " · EMOM : un tour au début de chaque minute" if "emom" in section["title"].casefold() else ""
+    emom = " · EMOM : un tour au début de chaque minute" if re.search(r"\bem(?:om|on)\b", section["title"], re.IGNORECASE) else ""
     match_note = "" if exact_match else " · nom d'exercice Garmin générique"
     exercise_instruction = f"{item['reps']} x {item['name']}{reference}"
-    description = (
-        f"{section['title']} · {exercise_instruction}{explanation}{note}{emom}{match_note}"
-    )
+    section_summary = section.get("summary") or section["title"]
+    description = f"{section_summary} · {exercise_instruction}{explanation}{note}{emom}{match_note}"
     return {
         "type": "ExecutableStepDTO",
         "stepOrder": step_order,
@@ -1003,7 +1098,33 @@ def _exercise_step(
     }
 
 
-def _rest_step(seconds: int, step_order: int) -> dict[str, Any]:
+def _section_item_step(
+    item: dict[str, Any],
+    section: dict[str, Any],
+    step_order: int,
+) -> dict[str, Any]:
+    if item.get("kind") == "reps":
+        return _exercise_step(item, section, step_order)
+
+    section_summary = section.get("summary") or section["title"]
+    detail = item.get("description", "").strip()
+    if item.get("explanation"):
+        detail += " — " + " ".join(item["explanation"])
+    if section.get("notes"):
+        detail += f" · {section['notes']}"
+    return _time_or_manual_step(
+        step_order,
+        f"{section_summary} · {detail}"[:200],
+        item.get("duration_seconds"),
+        _step_kind(section["title"], "strength_training"),
+    )
+
+
+def _rest_step(
+    seconds: int,
+    step_order: int,
+    description: str = "Récupération",
+) -> dict[str, Any]:
     return {
         "type": "ExecutableStepDTO",
         "stepOrder": step_order,
@@ -1020,6 +1141,7 @@ def _rest_step(seconds: int, step_order: int) -> dict[str, Any]:
             "workoutTargetTypeKey": "no.target",
             "displayOrder": 1,
         },
+        "description": description[:200],
     }
 
 
@@ -1028,8 +1150,9 @@ def _repeat_group(
     steps: list[dict[str, Any]],
     step_order: int,
     skip_last_rest: bool,
+    description: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    group = {
         "type": "RepeatGroupDTO",
         "stepOrder": step_order,
         "stepType": {"stepTypeId": 6, "stepTypeKey": "repeat", "displayOrder": 6},
@@ -1044,6 +1167,9 @@ def _repeat_group(
         "endConditionValue": float(rounds),
         "skipLastRestStep": skip_last_rest,
     }
+    if description:
+        group["description"] = description[:200]
+    return group
 
 
 def _build_strength_workout(
@@ -1053,7 +1179,7 @@ def _build_strength_workout(
     source_text: str,
 ) -> tuple[dict[str, Any], str]:
     compact_page_id = page_id.replace("-", "").casefold()
-    digest = hashlib.sha256(("structured-workout-v3\n" + title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
+    digest = hashlib.sha256(("structured-workout-v4\n" + title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
     page_marker = compact_page_id[:PAGE_MARKER_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
     workout_name = f"{title[:48].rstrip()} {marker}"[:100]
@@ -1063,23 +1189,32 @@ def _build_strength_workout(
     for section in sections:
         rounds = section["rounds"]
         child_steps = [
-            _exercise_step(item, section, step_order + index + 1)
+            _section_item_step(item, section, step_order + index + 1)
             for index, item in enumerate(section["exercises"])
         ]
         has_rest = section.get("rest_seconds") is not None and section["rest_seconds"] > 0
         if has_rest and rounds > 1:
             child_steps.append(
-                _rest_step(section["rest_seconds"], step_order + len(child_steps) + 1)
+                _rest_step(section["rest_seconds"], step_order + len(child_steps) + 1, section["title"] + " · Récupération")
             )
 
         if rounds > 1:
             steps.append(
-                _repeat_group(rounds, child_steps, step_order, skip_last_rest=has_rest)
+                _repeat_group(
+                    rounds,
+                    child_steps,
+                    step_order,
+                    skip_last_rest=has_rest,
+                    description=section.get("summary") or section["title"],
+                )
             )
             step_order += len(child_steps) + 2
         else:
             for item in section["exercises"]:
-                steps.append(_exercise_step(item, section, step_order))
+                steps.append(_section_item_step(item, section, step_order))
+                step_order += 1
+            if has_rest:
+                steps.append(_rest_step(section["rest_seconds"], step_order, section["title"] + " · Récupération"))
                 step_order += 1
 
     if not steps:
@@ -1107,7 +1242,6 @@ def _build_strength_workout(
         "description": "",
     }
     return workout, marker
-
 
 def all_garmin_workouts(garmin: Garmin) -> list[dict[str, Any]]:
     workouts: list[dict[str, Any]] = []
