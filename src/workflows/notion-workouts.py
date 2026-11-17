@@ -61,7 +61,7 @@ EXERCISE_LINE = re.compile(
     r"(?:\s*[—–-]\s*(?P<reference>\d+))?$",
     re.IGNORECASE,
 )
-ATELIER_HEADER = re.compile(r"^(?:atelier(?:\s+\d+)?\b.*|(?:emom|emon)\b.*|(?:échauffement|echauffement|warm[ -]?up|mise en selle|retour au calme|cooldown|séance principale|seance principale|séance|seance|récupération|recuperation)\b.*)$", re.IGNORECASE)
+ATELIER_HEADER = re.compile(r"^(?:atelier(?:\s+\d+)?\b.*|(?:emom|emon)\b.*|(?:échauffement|echauffement|warm[ -]?up|mise en selle|retour au calme|cooldown|séance principale|seance principale|séance|seance)\b.*)$", re.IGNORECASE)
 REVERSED_EXERCISE_LINE = re.compile(r"^(?P<name>.+?)\s*[x×]\s*(?P<reps>\d+(?:/\d+)?)$", re.IGNORECASE)
 SETS_LINE = re.compile(r"^s(?:é|e)ries?\s*[:：]\s*(\d+)\b", re.IGNORECASE)
 NOTE_LINE = re.compile(r"^(?:notes?|remarques?)\s*[:：]\s*(.*)$", re.IGNORECASE)
@@ -372,7 +372,7 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
     collecting_note = False
 
     def save_section() -> None:
-        if current and current["exercises"]:
+        if current and (current["exercises"] or current["rest_seconds"] is not None):
             duration_match = EMOM_DURATION.search(current["title"])
             rounds = current["sets"]
             if rounds is None:
@@ -384,7 +384,11 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
 
     for raw_line in lines:
         line = re.sub(r"^(?:[-*•]\s+|[☐☑]\s*)", "", raw_line).strip()
-        if ATELIER_HEADER.match(line):
+        recovery_header = bool(
+            re.match(r"^(?:récupération|recuperation|repos)\b", line, re.IGNORECASE)
+            and not DURATION_TOKEN.search(line)
+        )
+        if ATELIER_HEADER.match(line) or recovery_header:
             save_section()
             current = {
                 "title": line.rstrip(":： "),
@@ -1116,6 +1120,31 @@ def _section_item_step(
     )
 
 
+def _rest_step(
+    seconds: int,
+    step_order: int,
+    description: str = "Récupération",
+) -> dict[str, Any]:
+    return {
+        "type": "ExecutableStepDTO",
+        "stepOrder": step_order,
+        "stepType": {"stepTypeId": 5, "stepTypeKey": "rest", "displayOrder": 5},
+        "endCondition": {
+            "conditionTypeId": 2,
+            "conditionTypeKey": "time",
+            "displayOrder": 2,
+            "displayable": True,
+        },
+        "endConditionValue": float(seconds),
+        "targetType": {
+            "workoutTargetTypeId": 1,
+            "workoutTargetTypeKey": "no.target",
+            "displayOrder": 1,
+        },
+        "description": description[:200],
+    }
+
+
 def _repeat_group(
     rounds: int,
     steps: list[dict[str, Any]],
@@ -1166,7 +1195,7 @@ def _build_strength_workout(
         has_rest = section.get("rest_seconds") is not None and section["rest_seconds"] > 0
         if has_rest and rounds > 1:
             child_steps.append(
-                _rest_step(section["rest_seconds"], step_order + len(child_steps) + 1)
+                _rest_step(section["rest_seconds"], step_order + len(child_steps) + 1, section["title"] + " · Récupération")
             )
 
         if rounds > 1:
@@ -1185,7 +1214,7 @@ def _build_strength_workout(
                 steps.append(_section_item_step(item, section, step_order))
                 step_order += 1
             if has_rest:
-                steps.append(_rest_step(section["rest_seconds"], step_order))
+                steps.append(_rest_step(section["rest_seconds"], step_order, section["title"] + " · Récupération"))
                 step_order += 1
 
     if not steps:
