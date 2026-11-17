@@ -672,6 +672,95 @@ def _legacy_activity_image(child: dict, activity_id: str) -> bool:
     )
 
 
+def _is_report_marker_block(block: dict) -> bool:
+    return (
+        block.get("type") == "paragraph"
+        and "garmin-activity-id:" in _block_text(block)
+    )
+
+
+def _is_legacy_report_image(block: dict) -> bool:
+    if block.get("type") != "image":
+        return False
+    image = block.get("image", {})
+    filename = (
+        image.get("file", {}).get("name")
+        or image.get("external", {}).get("url", "")
+    ).casefold()
+    caption = "".join(
+        part.get("plain_text", "")
+        for part in image.get("caption", [])
+    ).casefold()
+    return bool(re.search(r"garmin-[a-z0-9_-]+-bilan", filename)) or (
+        "activité garmin :" in caption
+    )
+
+
+def _find_report_containers(
+    notion: NotionClient,
+    page_id: str,
+) -> list[dict]:
+    containers = []
+
+    def walk(parent_id: str, blocks: list[dict] | None = None) -> None:
+        source = _children(notion, parent_id) if blocks is None else blocks
+        for block in source:
+            block_type = block.get("type", "")
+            payload = block.get(block_type, {})
+            children = (
+                _children(notion, block["id"])
+                if block.get("has_children")
+                else []
+            )
+            if (
+                _block_text(block).casefold() == REPORT_TITLE.casefold()
+                and (block_type == "toggle" or payload.get("is_toggleable"))
+            ):
+                containers.append({
+                    "block": block,
+                    "parent_id": parent_id,
+                    "children": children,
+                })
+            if children:
+                walk(block["id"], children)
+
+    walk(page_id)
+    return containers
+
+
+def _report_user_content_count(children: list[dict]) -> int:
+    managed_ids = set()
+    for index, child in enumerate(children):
+        if _is_report_marker_block(child):
+            managed_ids.add(child["id"])
+            if (
+                index + 1 < len(children)
+                and children[index + 1].get("type") == "embed"
+            ):
+                managed_ids.add(children[index + 1]["id"])
+        elif (
+            child.get("type") == "embed"
+            and "/reports/" in child.get("embed", {}).get("url", "")
+        ):
+            managed_ids.add(child["id"])
+        elif _is_legacy_report_image(child):
+            managed_ids.add(child["id"])
+    return sum(1 for child in children if child["id"] not in managed_ids)
+
+
+def _choose_report_container(
+    notion: NotionClient,
+    page_id: str,
+) -> dict | None:
+    containers = _find_report_containers(notion, page_id)
+    if not containers:
+        return None
+    return max(
+        containers,
+        key=lambda item: _report_user_content_count(item["children"]),
+    )
+
+
 def _has_private_report_marker(children: list[dict], activity_id: str) -> bool:
     marker = _report_marker(activity_id)
     for index, child in enumerate(children[:-1]):
