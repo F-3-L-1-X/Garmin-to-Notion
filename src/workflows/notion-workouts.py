@@ -61,11 +61,11 @@ EXERCISE_LINE = re.compile(
     r"(?:\s*[—–-]\s*(?P<reference>\d+))?$",
     re.IGNORECASE,
 )
-ATELIER_HEADER = re.compile(r"^(?:atelier(?:\s+\d+)?\b.*|emom\b.*|(?:échauffement|echauffement|warm[ -]?up|mise en selle|retour au calme|cooldown|séance principale|seance principale|séance|seance|récupération|recuperation)\b.*)$", re.IGNORECASE)
+ATELIER_HEADER = re.compile(r"^(?:atelier(?:\s+\d+)?\b.*|(?:emom|emon)\b.*|(?:échauffement|echauffement|warm[ -]?up|mise en selle|retour au calme|cooldown|séance principale|seance principale|séance|seance|récupération|recuperation)\b.*)$", re.IGNORECASE)
 REVERSED_EXERCISE_LINE = re.compile(r"^(?P<name>.+?)\s*[x×]\s*(?P<reps>\d+(?:/\d+)?)$", re.IGNORECASE)
 SETS_LINE = re.compile(r"^s(?:é|e)ries?\s*[:：]\s*(\d+)\b", re.IGNORECASE)
 NOTE_LINE = re.compile(r"^(?:notes?|remarques?)\s*[:：]\s*(.*)$", re.IGNORECASE)
-EMOM_DURATION = re.compile(r"\bemom\b.*?(\d+)\s*(?:min|minutes|mn)\b", re.IGNORECASE)
+EMOM_DURATION = re.compile(r"\bem(?:om|on)\b.*?(\d+)\s*(?:min|minutes|mn)\b", re.IGNORECASE)
 REST_TIME = re.compile(
     r"""(?P<amount>\d+(?:[,.]\d+)?)\s*(?P<unit>minutes?|mins?|mn\b|secondes?|secs?|s\b|[’'′]{2}|["”“″]|[’'′])""",
     re.IGNORECASE,
@@ -313,7 +313,7 @@ def _plan_section_kind(line: str) -> str | None:
         return "cooldown"
     if normalized.startswith(("recuperation", "repos")):
         return "recovery"
-    if normalized.startswith(("cardio", "seance", "entrainement", "fractionne", "atelier", "emom")):
+    if normalized.startswith(("cardio", "seance", "entrainement", "fractionne", "atelier", "emom", "emon")):
         return "interval"
     return None
 
@@ -1063,7 +1063,7 @@ def _exercise_step(
     reference = f" · Réf. {item['reference']}" if item.get("reference") else ""
     explanation = " — " + " ".join(item.get("explanation", [])) if item.get("explanation") else ""
     note = f" · {section['notes']}" if section.get("notes") else ""
-    emom = " · EMOM : un tour au début de chaque minute" if "emom" in section["title"].casefold() else ""
+    emom = " · EMOM : un tour au début de chaque minute" if re.search(r"\bem(?:om|on)\b", section["title"], re.IGNORECASE) else ""
     match_note = "" if exact_match else " · nom d'exercice Garmin générique"
     exercise_instruction = f"{item['reps']} x {item['name']}{reference}"
     section_summary = section.get("summary") or section["title"]
