@@ -68,7 +68,11 @@ EXERCISE_LINE = re.compile(
     re.IGNORECASE,
 )
 ATELIER_HEADER = re.compile(r"^(?:atelier(?:\s+\d+)?\b.*|(?:emom|emon)\b.*|(?:échauffement|echauffement|warm[ -]?up|mise en selle|retour au calme|cooldown|séance principale|seance principale|séance|seance)\b.*)$", re.IGNORECASE)
-REVERSED_EXERCISE_LINE = re.compile(r"^(?P<name>.+?)\s*[x×]\s*(?P<reps>\d+(?:/\d+)?)$", re.IGNORECASE)
+REVERSED_EXERCISE_LINE = re.compile(
+    r"^(?P<name>.+?)\s*[x×]\s*(?P<reps>\d+(?:/\d+)?)"
+    r"(?:\s*(?:\((?P<qualifier>[^)]*)\)|[—–-]\s*(?P<qualifier_text>.+)))?$",
+    re.IGNORECASE,
+)
 SETS_LINE = re.compile(
     r"^(?:s(?:é|e)ries?\s*[:：]\s*(?P<after>\d+)|[x×]\s*(?P<times>\d+)\s*s(?:é|e)ries?|\b(?P<before>\d+)\s*s(?:é|e)ries?)\s*$",
     re.IGNORECASE,
@@ -417,15 +421,32 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
         recovery_header = bool(
             re.match(r"^(?:récupération|recuperation|repos)\b", line, re.IGNORECASE)
         )
-        if ATELIER_HEADER.match(line) or recovery_header:
+        if ATELIER_HEADER.match(line):
             save_section()
             current = {
                 "title": line.rstrip(":： "),
                 "sets": None,
-                "rest_seconds": _parse_rest_seconds(line) if recovery_header else None,
+                "rest_seconds": None,
                 "exercises": [],
                 "notes": [],
             }
+            current_exercise = None
+            collecting_note = False
+            continue
+
+        if recovery_header:
+            rest_seconds = _parse_rest_seconds(line)
+            if current and current["exercises"]:
+                current["rest_seconds"] = rest_seconds
+            else:
+                save_section()
+                current = {
+                    "title": line.rstrip(":： "),
+                    "sets": None,
+                    "rest_seconds": rest_seconds,
+                    "exercises": [],
+                    "notes": [],
+                }
             current_exercise = None
             collecting_note = False
             continue
@@ -468,12 +489,18 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
                 "explanation": [],
             }
             current["exercises"].append(current_exercise)
+            current_exercise = current["exercises"][-1]
             collecting_note = False
             continue
 
         reversed_exercise = REVERSED_EXERCISE_LINE.match(line)
         if reversed_exercise:
             reps_text = reversed_exercise.group("reps")
+            qualifier = (
+                reversed_exercise.group("qualifier")
+                or reversed_exercise.group("qualifier_text")
+                or ""
+            ).strip()
             if "/" in reps_text:
                 item = {"kind": "manual", "description": line, "explanation": []}
             else:
@@ -482,7 +509,7 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
                     "reps": int(reps_text),
                     "name": reversed_exercise.group("name").strip(),
                     "reference": None,
-                    "explanation": [],
+                    "explanation": [qualifier] if qualifier else [],
                 }
             current["exercises"].append(item)
             current_exercise = item
@@ -1576,11 +1603,13 @@ def _exercise_step(
     item: dict[str, Any],
     section: dict[str, Any],
     step_order: int,
+    include_section_title: bool = False,
 ) -> dict[str, Any]:
     category, exercise_name, _ = _resolve_exercise(item["name"])
     reference = f" · Réf. {item['reference']}" if item.get("reference") else ""
     explanation = _brief_explanation(item, 140)
-    description = f"{item['name']} · {item['reps']} répétitions{reference}"
+    section_prefix = f"{section['title']} · " if include_section_title else ""
+    description = f"{section_prefix}{item['name']} · {item['reps']} répétitions{reference}"
     if explanation:
         description += f" — {explanation}"
     step_kind = _step_kind(section["title"], "strength_training")
@@ -1610,11 +1639,14 @@ def _section_item_step(
     item: dict[str, Any],
     section: dict[str, Any],
     step_order: int,
+    include_section_title: bool = False,
 ) -> dict[str, Any]:
     if item.get("kind") == "reps":
-        return _exercise_step(item, section, step_order)
+        return _exercise_step(item, section, step_order, include_section_title)
 
     description = item.get("description", "").strip()
+    if include_section_title and section.get("title"):
+        description = f"{section['title']} · {description}"
     explanation = _brief_explanation(item, 140)
     if explanation:
         description += f" — {explanation}"
@@ -1689,7 +1721,7 @@ def _build_strength_workout(
     source_text: str,
 ) -> tuple[dict[str, Any], str]:
     compact_page_id = page_id.replace("-", "").casefold()
-    digest = hashlib.sha256(("structured-workout-v7\n" + title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
+    digest = hashlib.sha256(("structured-workout-v8\n" + title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
     page_marker = compact_page_id[:PAGE_MARKER_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
     workout_name = f"Muscu progres · {title[:48].rstrip()} {marker}"[:100]
@@ -1721,32 +1753,46 @@ def _build_strength_workout(
                 step_order += 1
             continue
 
-        child_steps = [
-            _section_item_step(item, section, step_order + index + 1)
-            for index, item in enumerate(section["exercises"])
-        ]
-        if has_rest and rounds > 1:
-            child_steps.append(
+        if rounds > 1:
+            child_steps = [
+                _section_item_step(item, section, index + 1)
+                for index, item in enumerate(section["exercises"])
+            ]
+            if has_rest:
+                child_steps.append(
+                    _rest_step(section["rest_seconds"], len(child_steps) + 1, "Récupération")
+                )
+            if child_steps:
+                steps.append(
+                    _repeat_group(
+                        rounds,
+                        child_steps,
+                        step_order,
+                        skip_last_rest=has_rest,
+                        description=_strength_section_description(section),
+                    )
+                )
+                step_order += 1
+            continue
+
+        for item in section["exercises"]:
+            steps.append(
+                _section_item_step(
+                    item,
+                    section,
+                    step_order,
+                    include_section_title=True,
+                )
+            )
+            step_order += 1
+        if has_rest:
+            steps.append(
                 _rest_step(
                     section["rest_seconds"],
-                    step_order + len(child_steps) + 1,
-                    "Récupération",
-                )
-            )
-
-        if child_steps:
-            steps.append(
-                _repeat_group(
-                    rounds,
-                    child_steps,
                     step_order,
-                    skip_last_rest=has_rest and rounds > 1,
-                    description=_strength_section_description(section),
+                    f"Récupération après {title_text}",
                 )
             )
-            step_order += len(child_steps) + 2
-        if has_rest and rounds == 1:
-            steps.append(_rest_step(section["rest_seconds"], step_order, "Récupération"))
             step_order += 1
 
     if not steps:
