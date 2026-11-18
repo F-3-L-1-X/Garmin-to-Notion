@@ -991,7 +991,7 @@ def _parse_cardio_steps(lines: list[str], sport_key: str) -> list[dict[str, Any]
                 )
                 steps.append(group)
                 current_instruction_steps.append(group)
-                order += len(children) + 2
+                order += 1
             else:
                 description = (
                     f"{section_title} · {item['description']}"
@@ -1493,9 +1493,12 @@ def _generic_workout(
     steps: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], str]:
     page_marker = page_id.replace("-", "").casefold()[:PAGE_MARKER_LENGTH]
+    sport_key = sport_type.get("sportTypeKey")
     digest_version = (
-        "structured-bike-workout-v8"
-        if sport_type.get("sportTypeKey") == "cycling"
+        "structured-bike-workout-v9"
+        if sport_key == "cycling"
+        else "structured-running-workout-v8"
+        if sport_key == "running"
         else "structured-workout-v7"
     )
     digest = hashlib.sha256(
