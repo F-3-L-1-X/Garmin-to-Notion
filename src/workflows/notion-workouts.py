@@ -1088,7 +1088,10 @@ def _parse_swim_steps(lines: list[str]) -> list[dict[str, Any]]:
 
 
 
-def _numbered_routine_steps(lines: list[str]) -> list[dict[str, Any]]:
+def _numbered_routine_steps(
+    lines: list[str],
+    sport_key: str = "other",
+) -> list[dict[str, Any]]:
     sections: list[dict[str, Any]] = []
     section: dict[str, Any] | None = None
     current_item: dict[str, str] | None = None
@@ -1515,7 +1518,7 @@ def build_garmin_workout(
         if not steps:
             steps = _generic_prompt_steps(plan_lines, sport_key)
     else:
-        steps = _numbered_routine_steps(plan_lines)
+        steps = _numbered_routine_steps(plan_lines, sport_key)
         if not steps:
             steps = _generic_prompt_steps(plan_lines, sport_key)
     return _generic_workout(
