@@ -269,7 +269,7 @@ def sport_for_disciplines(disciplines: list[str]) -> dict[str, Any] | None:
         "aikido", "wingsuit", "skiraquette", "skideraquette", "raquette", "ski",
     )
     for discipline in priority:
-        if discipline in normalized:
+        if any(discipline in value for value in normalized):
             return dict(SPORT_TYPES[DISCIPLINE_SPORTS[discipline]])
     return None
 
@@ -1915,7 +1915,17 @@ def sync_page(
 ) -> bool:
     title = page_title(page) or "Séance"
     disciplines = page_disciplines(page)
-    if sport_for_disciplines(disciplines) is None:
+    sport_type = sport_for_disciplines(disciplines)
+    explicitly_non_workout = any(
+        normalize_name(value) in NON_WORKOUT_DISCIPLINES for value in disciplines
+    )
+    if sport_type is None and not explicitly_non_workout:
+        inferred_sport = sport_for_disciplines([title])
+        if inferred_sport is not None:
+            disciplines = [title]
+            sport_type = inferred_sport
+            print(f"Discipline déduite du titre de la page « {title} ».")
+    if sport_type is None:
         print(f"Séance ignorée sur la montre (repos, massage ou discipline inconnue) : « {title} ».")
         return False
     lines = page_content_lines(notion, page["id"])
