@@ -79,7 +79,7 @@ TIME_TOKEN_PATTERN = (
     r"""(?P<amount>\d+(?:[,.]\d+)?)\s*"""
     r"""(?P<unit>minutes?|mins?|mn\b|secondes?|secs?|s\b|[’'′]{2}|["”“″]|[’'′])"""
     r"""(?:\s*(?P<second_amount>\d+(?:[,.]\d+)?)\s*"""
-    r"""(?P<second_unit>secondes?|secs?|s\b|["”“″]|[’'′]{2}))?"""
+    r"""(?P<second_unit>secondes?|secs?|s\b|["”“″]|[’'′]{2})?))?"""
 )
 REST_TIME = re.compile(TIME_TOKEN_PATTERN, re.IGNORECASE)
 
@@ -1455,7 +1455,7 @@ def _generic_workout(
 ) -> tuple[dict[str, Any], str]:
     page_marker = page_id.replace("-", "").casefold()[:PAGE_MARKER_LENGTH]
     digest = hashlib.sha256(
-        ("structured-workout-v5\n" + title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
+        ("structured-workout-v6\n" + title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
     ).hexdigest()[:HASH_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
     if not steps:
@@ -1672,7 +1672,7 @@ def _build_strength_workout(
     source_text: str,
 ) -> tuple[dict[str, Any], str]:
     compact_page_id = page_id.replace("-", "").casefold()
-    digest = hashlib.sha256(("structured-workout-v5\n" + title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
+    digest = hashlib.sha256(("structured-workout-v6\n" + title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
     page_marker = compact_page_id[:PAGE_MARKER_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
     workout_name = f"Muscu progres · {title[:48].rstrip()} {marker}"[:100]
