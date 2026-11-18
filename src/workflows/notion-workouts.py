@@ -520,7 +520,7 @@ DURATION_TOKEN = re.compile(
     re.IGNORECASE,
 )
 DISTANCE_TOKEN = re.compile(
-    r"""(?P<distance>\d+(?:[,.]\d+)?)\s*(?P<unit>kilomètres?|kilometres?|km|mètres?|metres?|m)\b""",
+    r"""(?P<distance>\d+(?:[,.]\d+)?)\s*(?P<unit>kilomètres?|kilometres?|km|mètres?|metres?|m)\b(?!\s*/\s*(?:h|hr|hour|hours)\b)""",
     re.IGNORECASE,
 )
 REPEAT_TOKEN = re.compile(r"(?P<count>\d+)\s*[x×]\s*\((?P<body>[^)]*)\)", re.IGNORECASE)
@@ -679,6 +679,28 @@ def _step_kind(label: str, sport_key: str) -> str:
     return "interval"
 
 
+def _last_measure_boundary(text: str) -> int:
+    boundaries = [match.end() for match in re.finditer(r"\s+/\s+", text)]
+    boundaries.extend(match.end() for match in re.finditer(r"[+;]", text))
+    return max(boundaries, default=0)
+
+
+def _next_measure_boundary(text: str) -> int:
+    boundaries = [match.start() for match in re.finditer(r"\s+/\s+", text)]
+    boundaries.extend(match.start() for match in re.finditer(r"[+;]", text))
+    return min(boundaries, default=len(text))
+
+
+def _measure_segment(full_line: str, match: re.Match[str]) -> str:
+    left = full_line[:match.start()]
+    right = full_line[match.end():]
+    return (
+        left[_last_measure_boundary(left):]
+        + match.group(0)
+        + right[:_next_measure_boundary(right)]
+    ).strip(" ()+/;")
+
+
 def _time_segment(
     match: re.Match[str],
     full_line: str,
@@ -695,17 +717,9 @@ def _time_segment(
     elif not label and any(word in context for word in ("retour au calme", "cooldown")):
         label = "Retour au calme"
     elif not label:
-        prefix = re.split(r"[+;/]", full_line[:match.start()])[-1].strip(" ():")
+        prefix = full_line[_last_measure_boundary(full_line[:match.start()]) :].strip(" ():")
         label = prefix.split()[-1] if prefix else "Effort"
-    left = full_line[:match.start()]
-    right = full_line[match.end():]
-    left_boundary = max(left.rfind("+"), left.rfind("/"), left.rfind(";"))
-    right_boundaries = [position for position in (right.find("+"), right.find("/"), right.find(";")) if position >= 0]
-    segment = (
-        left[left_boundary + 1:]
-        + match.group(0)
-        + right[:min(right_boundaries) if right_boundaries else len(right)]
-    ).strip(" ()+/;")
+    segment = _measure_segment(full_line, match)
     if sport_key == "running" and label.casefold() in {"c", "m"}:
         step_name = "Course" if label.casefold() == "c" else "Marche"
         segment = f"{step_name} · {segment}"
@@ -750,15 +764,7 @@ def _distance_segment(
     unit = normalize_name(match.group("unit"))
     amount = float(match.group("distance").replace(",", "."))
     distance_meters = round(amount * 1000) if unit in {"km", "kilometre", "kilometres"} else round(amount)
-    left = full_line[:match.start()]
-    right = full_line[match.end():]
-    left_boundary = max(left.rfind("+"), left.rfind("/"), left.rfind(";"))
-    right_boundaries = [position for position in (right.find("+"), right.find("/"), right.find(";")) if position >= 0]
-    segment = (
-        left[left_boundary + 1:]
-        + match.group(0)
-        + right[:min(right_boundaries) if right_boundaries else len(right)]
-    ).strip(" ()+/;")
+    segment = _measure_segment(full_line, match)
     kind = _step_kind(full_line, sport_key)
     if kind == "interval" and default_kind != "interval":
         kind = default_kind
@@ -895,6 +901,12 @@ def _parse_cardio_steps(lines: list[str], sport_key: str) -> list[dict[str, Any]
                     order += 1
             continue
         if _is_plan_heading(line) or _is_cycle_marker(line) or _is_source_line(line):
+            continue
+        if sport_key == "cycling" and normalize_name(line).startswith(
+            ("consignes", "organisation", "prevision", "notes", "remarques", "distancetotale")
+        ):
+            # These are contextual notes, not interval prescriptions. In particular,
+            # values such as "toutes les 15 min" must not become workout steps.
             continue
         items = _cardio_tokens(line, sport_key, section_kind)
         if not items:
@@ -1454,8 +1466,13 @@ def _generic_workout(
     steps: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], str]:
     page_marker = page_id.replace("-", "").casefold()[:PAGE_MARKER_LENGTH]
+    digest_version = (
+        "structured-bike-workout-v8"
+        if sport_type.get("sportTypeKey") == "cycling"
+        else "structured-workout-v7"
+    )
     digest = hashlib.sha256(
-        ("structured-workout-v7\n" + title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
+        (digest_version + "\n" + title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
     ).hexdigest()[:HASH_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
     if not steps:
