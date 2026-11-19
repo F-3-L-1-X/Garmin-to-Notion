@@ -264,6 +264,8 @@ def _training_lines(lines: list[str]) -> list[str]:
     selected: list[str] = []
     active = False
     skip_context_value = False
+    skip_until_heading = False
+    has_plan_heading = any(_is_plan_heading(_clean_plan_line(raw)) for raw in lines)
     for raw_line in lines:
         list_item = _is_list_item(raw_line)
         line = _clean_plan_line(raw_line)
@@ -273,9 +275,14 @@ def _training_lines(lines: list[str]) -> list[str]:
         if re.match(r"^(?:retouraucalme|bilandelaseance|bilan)\b", normalized):
             break
         if skip_context_value:
-            skip_context_value = False
             if not _is_plan_heading(line):
+                # Un bloc « Objectif » peut avoir plusieurs puces : on les ignore toutes
+                # jusqu'au titre suivant (échauffement, séance…).
+                if not skip_until_heading:
+                    skip_context_value = False
                 continue
+            skip_context_value = False
+            skip_until_heading = False
         if _is_source_line(line) or normalized.startswith(
             ("objectif", "discipline", "douleur", "intensite", "localisation")
         ):
@@ -283,6 +290,9 @@ def _training_lines(lines: list[str]) -> list[str]:
             if not separator:
                 _, separator, value = line.partition("：")
             skip_context_value = not separator or not value.strip()
+            skip_until_heading = (
+                skip_context_value and has_plan_heading and not _is_source_line(line)
+            )
             continue
         if _is_plan_heading(line):
             active = True
@@ -332,7 +342,7 @@ def _is_cycle_marker(line: str) -> bool:
 def _is_note_line(line: str) -> bool:
     """Consignes et totaux : ce sont des notes, pas des étapes de la séance."""
     return normalize_name(line).startswith(
-        ("consigne", "distancetotale", "dureetotale", "dureecible", "remarque")
+        ("consigne", "distancetotale", "dureetotale", "dureecible")
     )
 
 
@@ -409,6 +419,11 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
             collecting_note = True
             continue
 
+        if normalize_name(line).startswith(("consigne", "dureecible", "distancetotale")):
+            current_exercise = None
+            collecting_note = False
+            continue
+
         exercise_match = EXERCISE_LINE.match(line)
         if exercise_match:
             current_exercise = {
@@ -431,7 +446,9 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
 
 
 DURATION_TOKEN = re.compile(
-    r"(?P<amount>\d+(?:[,.]\d+)?)\s*(?P<unit>minutes?|mins?|mn|secondes?|secs?|s\b|[’'′])\s*"
+    r"(?P<amount>\d+(?:[,.]\d+)?)\s*"
+    r"(?P<unit>minutes?|mins?|mn|secondes?|secs?|s\b|’’|''|′′|″|[’'′])"
+    r"(?:(?P<extra>\d{1,2})(?!\d)(?:’’|''|′′|″)?)?\s*"
     r"(?P<label>[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ_-]*)?",
     re.IGNORECASE,
 )
@@ -454,8 +471,14 @@ def _fold_text(value: str) -> str:
 def _duration_seconds(match: re.Match[str]) -> int:
     amount = float(match.group("amount").replace(",", "."))
     unit = match.group("unit").casefold()
+    if unit in {"’’", "''", "′′", "″"}:
+        return max(1, round(amount))
     if unit.startswith(("min", "mn", "’", "'", "′")):
-        return max(1, round(amount * 60))
+        seconds = amount * 60
+        extra = match.group("extra")
+        if extra and unit in {"’", "'", "′"}:
+            seconds += int(extra)
+        return max(1, round(seconds))
     return max(1, round(amount))
 
 
@@ -774,6 +797,7 @@ def _numbered_routine_steps(lines: list[str]) -> list[dict[str, Any]]:
     current: dict[str, str] | None = None
     active = False
     section_kind = "interval"
+    numbered_found = False
     for raw_line in lines:
         list_item = _is_list_item(raw_line)
         line = _clean_plan_line(raw_line)
@@ -803,6 +827,7 @@ def _numbered_routine_steps(lines: list[str]) -> list[dict[str, Any]]:
             continue
         match = re.match(r"^\d+\s*[.)]\s*(.+)$", line)
         if match:
+            numbered_found = True
             if current:
                 items.append(current)
             title = match.group(1).strip()
@@ -823,6 +848,9 @@ def _numbered_routine_steps(lines: list[str]) -> list[dict[str, Any]]:
             current["details"] = (current["details"] + " " + line).strip()
     if current:
         items.append(current)
+    if not numbered_found:
+        # Pas de liste numérotée : la séance est lue ligne par ligne (_generic_prompt_steps).
+        return []
 
     steps: list[dict[str, Any]] = []
     for order, item in enumerate(items, start=1):
@@ -862,6 +890,25 @@ def _split_text_chunks(value: str, limit: int = 450) -> list[str]:
     return chunks
 
 
+LEADING_MULTIPLIER = re.compile(r"\s*(\d+)\s*[x×]\s*")
+EACH_SIDE = re.compile(
+    r"(?:’’|''|′′|″)?\s*(?:de\s+)?(?:par|chaque)\s+(?:côté|cote|jambe|bras|main|pied|épaule|epaule)\b",
+    re.IGNORECASE,
+)
+
+
+def _repetitions_for_duration(line: str, match: re.Match[str]) -> int:
+    """« 3 x 45’’ » = 3 fois ; « 1’ par jambe » = 2 fois ; « 3 x 45’’ par côté » = 6 fois."""
+    repeats = 1
+    before = LEADING_MULTIPLIER.fullmatch(line[:match.start()])
+    if before:
+        repeats = max(1, int(before.group(1)))
+    end = match.end("extra") if match.group("extra") else match.end("unit")
+    if EACH_SIDE.match(line[end:]):
+        repeats *= 2
+    return min(repeats, 30)
+
+
 def _generic_prompt_steps(
     lines: list[str],
     kind: str = "interval",
@@ -869,10 +916,19 @@ def _generic_prompt_steps(
 ) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
     last_instruction_steps: list[dict[str, Any]] = []
+    current_kind = kind
+    order = 1
     for raw_line in lines:
         list_item = _is_list_item(raw_line)
         line = _clean_plan_line(raw_line)
         normalized = normalize_name(line)
+        heading_kind = _plan_section_kind(line) if line else None
+        if heading_kind and not (
+            heading_kind == "interval"
+            and current_kind == "warmup"
+            and normalized.startswith("cardio")
+        ):
+            current_kind = heading_kind
         if (
             not line
             or _is_plan_heading(line)
@@ -884,6 +940,8 @@ def _generic_prompt_steps(
             continue
         if line.casefold().startswith(("source:", "distance totale", "consigne deload")):
             continue
+        if _is_note_line(line):
+            continue
         is_instruction = _is_explicit_instruction(line) or bool(
             instruction_pattern and instruction_pattern.match(line)
         )
@@ -893,12 +951,22 @@ def _generic_prompt_steps(
             continue
         match = DURATION_TOKEN.search(line)
         duration = _duration_seconds(match) if match else None
+        chunks = _split_text_chunks(line)
+        repeats = _repetitions_for_duration(line, match) if match else 1
         current_instruction_steps: list[dict[str, Any]] = []
-        for index, chunk in enumerate(_split_text_chunks(line), start=1):
-            chunk_duration = duration if index == 1 else None
-            step = _time_or_manual_step(len(steps) + 1, chunk, chunk_duration, kind)
-            steps.append(step)
-            current_instruction_steps.append(step)
+        if duration is not None and repeats > 1 and len(chunks) == 1:
+            child = _time_or_manual_step(order + 1, chunks[0], duration, current_kind)
+            group = _repeat_group(repeats, [child], order, skip_last_rest=False)
+            steps.append(group)
+            current_instruction_steps.append(group)
+            order += 2
+        else:
+            for index, chunk in enumerate(chunks, start=1):
+                chunk_duration = duration if index == 1 else None
+                step = _time_or_manual_step(order, chunk, chunk_duration, current_kind)
+                steps.append(step)
+                current_instruction_steps.append(step)
+                order += 1
         last_instruction_steps = current_instruction_steps
     return steps
 
