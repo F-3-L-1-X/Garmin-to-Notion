@@ -1,6 +1,6 @@
 # Garmin vers Notion — Journal d'entraînement
 
-Ce dépôt reprend le projet [garmin-to-notion de chloevoyer](https://github.com/chloevoyer/garmin-to-notion) sous licence MIT et adapte la synchronisation des activités à ta base Notion « Journal d'entraînement ».
+
 
 ## Ce qui est synchronisé
 
