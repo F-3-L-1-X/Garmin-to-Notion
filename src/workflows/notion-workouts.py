@@ -66,9 +66,24 @@ SETS_LINE = re.compile(r"^s(?:é|e)ries?\s*[:：]\s*(\d+)\b", re.IGNORECASE)
 NOTE_LINE = re.compile(r"^(?:notes?|remarques?)\s*[:：]\s*(.*)$", re.IGNORECASE)
 EMOM_DURATION = re.compile(r"\bemom\b.*?(\d+)\s*(?:min|minutes|mn)\b", re.IGNORECASE)
 REST_TIME = re.compile(
-    r"(?P<amount>\d+(?:[,.]\d+)?)\s*(?P<unit>minutes?|mins?|mn|secondes?|secs?|s)\b",
+    r"(?P<amount>\d+(?:[,.]\d+)?)\s*"
+    r"(?P<unit>minutes?\b|mins?\b|mn\b|secondes?\b|secs?\b|s\b|’’|''|″|′′|’|'|′)",
     re.IGNORECASE,
 )
+# En-tête d'atelier : « ATELIER 1 (POST-FATIGUE) — 3 séries, récup 1,30’ »
+SETS_IN_HEADER = re.compile(r"(\d+)\s*(?:s(?:é|e)ries?|tours?|rounds?)\b", re.IGNORECASE)
+REST_IN_HEADER = re.compile(r"r(?:é|e)cup(?:(?:é|e)ration)?\s*[:：]?\s*(?P<value>.+)$", re.IGNORECASE)
+HEADER_TAIL = re.compile(
+    r"\s*[—–-]\s*(?=\d+\s*(?:s(?:é|e)ries?|tours?|rounds?)\b|r(?:é|e)cup)", re.IGNORECASE
+)
+BULLET_PREFIX = re.compile(r"^(?:[-*•]\s+|[☐☑]\s*)")
+# « Planche latérale 20’’/côté », « Fente x8 par jambe »
+SIDE_TAIL = re.compile(
+    r"^\s*(?:/|par\s+|chaque\s+|de\s+chaque\s+)\s*(?:côté|cote|jambe|bras|main|pied)\w*\s*\.?$",
+    re.IGNORECASE,
+)
+# « Push-up x8 » : x ou X = nombre de répétitions de l'exercice
+REPS_ITEM = re.compile(r"^(?P<name>.+?)\s*[x×]\s*(?P<reps>\d+)(?P<tail>.*)$", re.IGNORECASE)
 
 
 def normalize_name(value: str) -> str:
@@ -356,13 +371,70 @@ def _parse_rest_seconds(line: str) -> int | None:
         return None
     raw = match.group("amount").replace(",", ".")
     unit = match.group("unit").casefold()
-    if unit.startswith(("min", "mn")):
+    if unit in {"’’", "''", "″", "′′"}:
+        return round(float(raw))
+    if unit.startswith(("min", "mn")) or unit in {"’", "'", "′"}:
         if "." in raw:
             whole, fraction = raw.split(".", 1)
             if len(fraction) == 2:
                 return int(whole) * 60 + int(fraction)
-        return round(float(raw) * 60)
+        seconds = round(float(raw) * 60)
+        after = line[match.end():]
+        if unit in {"’", "'", "′"}:
+            extra = re.match(r"(\d{1,2})(?!\d)", after)
+        else:  # « 1 min 30 » ou « 2 min 30 s »
+            extra = re.match(
+                r"\s+(\d{1,2})\s*(?:s|secs?|secondes?)?\s*$", after, re.IGNORECASE
+            )
+        if extra:
+            seconds += int(extra.group(1))
+        return seconds
     return round(float(raw))
+
+
+def _parse_bullet_exercise(line: str) -> dict[str, Any] | None:
+    """Exercice en puce : « Push-up x8 » (x = répétitions) ou « Planche 30’’ » (’ = minute, ’’ = seconde)."""
+    reps_match = REPS_ITEM.match(line)
+    if reps_match:
+        tail = reps_match.group("tail").strip()
+        name = reps_match.group("name").strip(" -—–:·")
+        explanation = ""
+        per_side = False
+        valid = not tail
+        if tail and SIDE_TAIL.match(tail):
+            per_side, valid = True, True
+        elif tail:
+            comment = re.match(r"^(?:[—–:·-]\s*|\(\s*)(.+?)\)?$", tail)
+            if comment:
+                explanation, valid = comment.group(1).strip(), True
+        if name and valid:
+            return {
+                "reps": int(reps_match.group("reps")),
+                "duration": None,
+                "name": name,
+                "reference": None,
+                "explanation": [explanation] if explanation else [],
+                "per_side": per_side,
+            }
+    duration_match = DURATION_TOKEN.search(line)
+    if duration_match:
+        name = line[:duration_match.start()].strip(" -—–:·")
+        end = (
+            duration_match.end("extra")
+            if duration_match.group("extra")
+            else duration_match.end("unit")
+        )
+        tail = line[end:].strip()
+        if name and (not tail or SIDE_TAIL.match(tail)):
+            return {
+                "reps": None,
+                "duration": _duration_seconds(duration_match),
+                "name": name,
+                "reference": None,
+                "explanation": [],
+                "per_side": bool(tail),
+            }
+    return None
 
 
 def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
@@ -382,13 +454,18 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
             sections.append(current)
 
     for raw_line in lines:
-        line = re.sub(r"^(?:[-*•]\s+|[☐☑]\s*)", "", raw_line).strip()
+        is_bullet = bool(BULLET_PREFIX.match(raw_line))
+        line = BULLET_PREFIX.sub("", raw_line).strip()
         if ATELIER_HEADER.match(line):
             save_section()
+            sets_match = SETS_IN_HEADER.search(line)
+            rest_match = REST_IN_HEADER.search(line)
             current = {
-                "title": line,
-                "sets": None,
-                "rest_seconds": None,
+                "title": HEADER_TAIL.split(line, maxsplit=1)[0].strip() or line,
+                "sets": int(sets_match.group(1)) if sets_match else None,
+                "rest_seconds": (
+                    _parse_rest_seconds(rest_match.group("value")) if rest_match else None
+                ),
                 "exercises": [],
                 "notes": [],
             }
@@ -428,13 +505,23 @@ def parse_sections(lines: list[str]) -> list[dict[str, Any]]:
         if exercise_match:
             current_exercise = {
                 "reps": int(exercise_match.group("reps")),
+                "duration": None,
                 "name": exercise_match.group("name").strip(),
                 "reference": exercise_match.group("reference"),
                 "explanation": [],
+                "per_side": False,
             }
             current["exercises"].append(current_exercise)
             collecting_note = False
             continue
+
+        if is_bullet:
+            bullet_exercise = _parse_bullet_exercise(line)
+            if bullet_exercise:
+                current_exercise = bullet_exercise
+                current["exercises"].append(current_exercise)
+                collecting_note = False
+                continue
 
         if collecting_note:
             current["notes"].append(line)
@@ -890,6 +977,54 @@ def _split_text_chunks(value: str, limit: int = 450) -> list[str]:
     return chunks
 
 
+def _pure_duration_cell(cell: str) -> tuple[int, bool] | None:
+    """Cellule qui ne contient qu'une durée : « 5’ », « 30’’ », « 20’’/côté »."""
+    text = cell.strip()
+    match = DURATION_TOKEN.match(text)
+    if not match:
+        return None
+    end = match.end("extra") if match.group("extra") else match.end("unit")
+    tail = text[end:].strip()
+    if tail and not SIDE_TAIL.match(tail):
+        return None
+    return _duration_seconds(match), bool(tail)
+
+
+def _table_row_cells(line: str) -> list[str] | None:
+    cells = [cell.strip() for cell in line.split(" | ")]
+    return cells if len(cells) >= 3 else None
+
+
+def _is_table_header_row(cells: list[str]) -> bool:
+    names = {normalize_name(cell) for cell in cells}
+    return "exercice" in names and "description" in names
+
+
+def _table_row_instruction(cells: list[str]) -> tuple[str, int | None, bool]:
+    start = 1 if re.fullmatch(r"\d{1,3}", cells[0]) else 0
+    name = cells[start]
+    others = [cell for cell in cells[start + 1:] if cell and cell not in {"—", "-"}]
+    quantity: str | None = None
+    duration: int | None = None
+    per_side = False
+    for cell in others:
+        pure = _pure_duration_cell(cell)
+        if pure:
+            quantity = cell
+            duration, per_side = pure
+            break
+        if re.match(r"^(?:[x×]\s*\d+|\d+\s*[x×])", cell, re.IGNORECASE):
+            quantity = cell
+            break
+    description = max((cell for cell in others if cell != quantity), key=len, default="")
+    text = name
+    if quantity:
+        text += f" · {quantity}"
+    if description:
+        text += f" — {description}"
+    return text, duration, per_side
+
+
 LEADING_MULTIPLIER = re.compile(r"\s*(\d+)\s*[x×]\s*")
 EACH_SIDE = re.compile(
     r"(?:’’|''|′′|″)?\s*(?:de\s+)?(?:par|chaque)\s+(?:côté|cote|jambe|bras|main|pied|épaule|epaule)\b",
@@ -918,10 +1053,14 @@ def _generic_prompt_steps(
     last_instruction_steps: list[dict[str, Any]] = []
     current_kind = kind
     order = 1
+    seen_rows: set[str] = set()
     for raw_line in lines:
         list_item = _is_list_item(raw_line)
         line = _clean_plan_line(raw_line)
         normalized = normalize_name(line)
+        cells = _table_row_cells(line) if line else None
+        if cells and _is_table_header_row(cells):
+            continue
         heading_kind = _plan_section_kind(line) if line else None
         if heading_kind and not (
             heading_kind == "interval"
@@ -942,17 +1081,27 @@ def _generic_prompt_steps(
             continue
         if _is_note_line(line):
             continue
-        is_instruction = _is_explicit_instruction(line) or bool(
-            instruction_pattern and instruction_pattern.match(line)
-        )
-        if not list_item and not is_instruction and last_instruction_steps:
-            for step in last_instruction_steps:
-                _append_step_explanation(step, line)
-            continue
-        match = DURATION_TOKEN.search(line)
-        duration = _duration_seconds(match) if match else None
-        chunks = _split_text_chunks(line)
-        repeats = _repetitions_for_duration(line, match) if match else 1
+        echo = re.match(r"^\((\d{1,3})\)\s", line)
+        if echo and echo.group(1) in seen_rows:
+            continue  # rappel « (7) Corde à sauter… » d'une ligne de tableau déjà lue
+        if cells:
+            if re.fullmatch(r"\d{1,3}", cells[0]):
+                seen_rows.add(cells[0])
+            row_text, duration, per_side = _table_row_instruction(cells)
+            chunks = _split_text_chunks(row_text)
+            repeats = 2 if (per_side and duration) else 1
+        else:
+            is_instruction = _is_explicit_instruction(line) or bool(
+                instruction_pattern and instruction_pattern.match(line)
+            )
+            if not list_item and not is_instruction and last_instruction_steps:
+                for step in last_instruction_steps:
+                    _append_step_explanation(step, line)
+                continue
+            match = DURATION_TOKEN.search(line)
+            duration = _duration_seconds(match) if match else None
+            chunks = _split_text_chunks(line)
+            repeats = _repetitions_for_duration(line, match) if match else 1
         current_instruction_steps: list[dict[str, Any]] = []
         if duration is not None and repeats > 1 and len(chunks) == 1:
             child = _time_or_manual_step(order + 1, chunks[0], duration, current_kind)
@@ -1024,7 +1173,7 @@ def _generic_workout(
 ) -> tuple[dict[str, Any], str]:
     page_marker = page_id.replace("-", "").casefold()[:PAGE_MARKER_LENGTH]
     digest = hashlib.sha256(
-        ("structured-workout-v4\n" + title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
+        ("structured-workout-v5\n" + title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
     ).hexdigest()[:HASH_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
     if not steps:
@@ -1130,6 +1279,27 @@ def _resolve_exercise(name: str) -> tuple[str, str, bool]:
     return category, "", False
 
 
+def _format_duration(seconds: int) -> str:
+    minutes, rest = divmod(int(seconds), 60)
+    if minutes and rest:
+        return f"{minutes} min {rest} s"
+    if minutes:
+        return f"{minutes} min"
+    return f"{rest} s"
+
+
+def _expanded_exercises(section: dict[str, Any]) -> list[dict[str, Any]]:
+    """Un exercice « par côté » devient deux étapes : côté 1/2 puis côté 2/2."""
+    expanded: list[dict[str, Any]] = []
+    for item in section["exercises"]:
+        if item.get("per_side"):
+            for label in ("côté 1/2", "côté 2/2"):
+                expanded.append({**item, "side": label})
+        else:
+            expanded.append(item)
+    return expanded
+
+
 def _exercise_step(
     item: dict[str, Any],
     section: dict[str, Any],
@@ -1141,9 +1311,28 @@ def _exercise_step(
     note = f" · {section['notes']}" if section.get("notes") else ""
     emom = " · EMOM : un tour au début de chaque minute" if "emom" in section["title"].casefold() else ""
     match_note = "" if exact_match else " · nom d'exercice Garmin générique"
-    exercise_instruction = f"{item['reps']} x {item['name']}{reference}"
+    side = f" · {item['side']}" if item.get("side") else ""
+    duration = item.get("duration")
+    if duration:
+        exercise_instruction = f"{item['name']} · {_format_duration(duration)}"
+        end_condition = {
+            "conditionTypeId": 2,
+            "conditionTypeKey": "time",
+            "displayOrder": 2,
+            "displayable": True,
+        }
+        end_value = float(duration)
+    else:
+        exercise_instruction = f"{item['reps']} x {item['name']}{reference}"
+        end_condition = {
+            "conditionTypeId": 10,
+            "conditionTypeKey": "reps",
+            "displayOrder": 10,
+            "displayable": True,
+        }
+        end_value = float(item["reps"])
     description = (
-        f"{section['title']} · {exercise_instruction}{explanation}{note}{emom}{match_note}"
+        f"{section['title']} · {exercise_instruction}{side}{explanation}{note}{emom}{match_note}"
     )
     return {
         "type": "ExecutableStepDTO",
@@ -1153,13 +1342,8 @@ def _exercise_step(
             "stepTypeKey": "interval",
             "displayOrder": 3,
         },
-        "endCondition": {
-            "conditionTypeId": 10,
-            "conditionTypeKey": "reps",
-            "displayOrder": 10,
-            "displayable": True,
-        },
-        "endConditionValue": float(item["reps"]),
+        "endCondition": end_condition,
+        "endConditionValue": end_value,
         "targetType": {
             "workoutTargetTypeId": 1,
             "workoutTargetTypeKey": "no.target",
@@ -1222,7 +1406,7 @@ def _build_strength_workout(
     warmup_steps: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], str]:
     compact_page_id = page_id.replace("-", "").casefold()
-    digest = hashlib.sha256(("structured-workout-v4\n" + title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
+    digest = hashlib.sha256(("structured-workout-v5\n" + title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
     page_marker = compact_page_id[:PAGE_MARKER_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
     workout_name = f"{title[:48].rstrip()} {marker}"[:100]
@@ -1231,9 +1415,10 @@ def _build_strength_workout(
     step_order = len(steps) + 1
     for section in sections:
         rounds = section["rounds"]
+        exercises = _expanded_exercises(section)
         child_steps = [
             _exercise_step(item, section, step_order + index + 1)
-            for index, item in enumerate(section["exercises"])
+            for index, item in enumerate(exercises)
         ]
         has_rest = section.get("rest_seconds") is not None and section["rest_seconds"] > 0
         if has_rest and rounds > 1:
@@ -1247,7 +1432,7 @@ def _build_strength_workout(
             )
             step_order += len(child_steps) + 2
         else:
-            for item in section["exercises"]:
+            for item in exercises:
                 steps.append(_exercise_step(item, section, step_order))
                 step_order += 1
 
