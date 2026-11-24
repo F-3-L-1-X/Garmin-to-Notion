@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from src.notion_schema import (
+    DatabaseSchema,
+    PropertySchema,
     SchemaError,
+    create_session_page,
     generate_session_page_properties,
     parse_database_metadata,
     retrieve_database_schemas,
@@ -25,6 +30,10 @@ DATABASE = {
             "id": "relation-id", "name": "Programme", "type": "relation",
             "relation": {"database_id": "linked-db"},
         },
+        "Charge": {
+            "id": "formula-id", "name": "Charge", "type": "formula",
+            "formula": {"expression": "1 + 1"},
+        },
     },
 }
 
@@ -32,23 +41,34 @@ DATABASE = {
 class FakeNotion:
     def __init__(self, databases):
         self.databases = self
+        self.pages = self
         self._databases = databases
+        self.created = []
 
     def retrieve(self, database_id):
         if database_id not in self._databases:
             raise RuntimeError("base inconnue")
         return self._databases[database_id]
 
+    def create(self, **kwargs):
+        self.created.append(kwargs)
+        return kwargs
 
-def test_parse_database_metadata_and_options():
+
+def test_parse_database_metadata_preserves_ids_options_and_formula():
     schema = parse_database_metadata("db-1", DATABASE)
     assert schema.id == "db-1"
     assert schema.properties["Nom"].id == "title-id"
     assert schema.properties["Discipline"].options == ("Yoga", "Course à pied")
+    assert schema.properties["Programme"].relation_database_ids == ("linked-db",)
+    assert schema.properties["Charge"].formula == {"expression": "1 + 1"}
 
 
-def test_retrieve_database_schemas_includes_relation():
-    fake = FakeNotion({"db-1": DATABASE, "linked-db": {"title": [{"plain_text": "Programmes"}], "properties": {}}})
+def test_retrieve_database_schemas_includes_linked_database_metadata_only():
+    fake = FakeNotion({
+        "db-1": DATABASE,
+        "linked-db": {"title": [{"plain_text": "Programmes"}], "properties": {}},
+    })
     schema = retrieve_database_schemas(fake, ["db-1"])
     assert set(schema.databases) == {"db-1", "linked-db"}
 
@@ -77,14 +97,29 @@ def test_valid_session_generation_and_relation():
         schema,
         "Nom",
         "Séance yoga",
-        {"Discipline": ["Yoga"], "Terminé": False, "Date": "2026-11-24", "Programme": ["prog-1"]},
+        {"Discipline": ["Yoga"], "Terminé": False, "Date": date(2026, 11, 24), "Programme": ["prog-1"]},
     )
     assert properties["title-id"] == {"title": [{"text": {"content": "Séance yoga"}}]}
     assert properties["discipline-id"]["multi_select"] == [{"name": "Yoga"}]
     assert properties["relation-id"]["relation"] == [{"id": "prog-1"}]
+    assert properties["date-id"]["date"] == {"start": "2026-11-24"}
+
+
+def test_creation_only_after_validation():
+    schema = parse_database_metadata("db-1", DATABASE)
+    fake = FakeNotion({})
+    with pytest.raises(SchemaError, match="inexistante"):
+        props = validate_session_properties(schema, {"Bad": "value"})
+        create_session_page(fake, schema, props)
+    assert fake.created == []
 
 
 def test_connection_error_is_explicit():
-    fake = FakeNotion({})
-    with pytest.raises(SchemaError, match="partage|ID invalide|base inconnue"):
-        retrieve_database_schemas(fake, ["db-1"])
+    with pytest.raises(SchemaError, match="base inconnue"):
+        retrieve_database_schemas(FakeNotion({}), ["db-1"])
+
+
+def test_unwritable_formula_is_refused():
+    schema = parse_database_metadata("db-1", DATABASE)
+    with pytest.raises(SchemaError, match="non créable"):
+        validate_session_properties(schema, {"Nom": "Séance", "Charge": 4})
