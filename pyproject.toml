@@ -9,3 +9,6 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "pytz==2024.1",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
