@@ -84,6 +84,19 @@ SIDE_TAIL = re.compile(
 )
 # « Push-up x8 » : x ou X = nombre de répétitions de l'exercice
 REPS_ITEM = re.compile(r"^(?P<name>.+?)\s*[x×]\s*(?P<reps>\d+)(?P<tail>.*)$", re.IGNORECASE)
+# Tableau « Séance » : « Bloc A — Atelier 1 Post-fatigue, 3 tours », puis « Bloc A (enchaîné) ».
+BLOCK_LABEL = re.compile(
+    r"^(?P<kind>bloc|atelier|circuit|superset|super-set)\s*(?P<id>[A-Za-z0-9]+)\b", re.IGNORECASE
+)
+BLOCK_ROUNDS_TAIL = re.compile(
+    r"[,;]?\s*\d+\s*(?:s(?:é|e)ries?|tours?|rounds?)\b.*$", re.IGNORECASE
+)
+# Cellule de répétitions : « x8 », « X 10 chaque sens », « 12 reps ».
+TABLE_REPS_CELL = re.compile(
+    r"^(?:[x×]\s*(?P<a>\d+)|(?P<b>\d+)\s*(?:reps?|r(?:é|e)p(?:é|e)titions?|r(?:é|e)ps?\.?)(?![A-Za-zÀ-ÿ]))\s*(?P<tail>.*)$",
+    re.IGNORECASE,
+)
+END_OF_ROUND = re.compile(r"fin\s*de\s*(?:tour|s(?:é|e)rie|bloc|round)", re.IGNORECASE)
 
 
 def normalize_name(value: str) -> str:
@@ -1044,10 +1057,52 @@ def _repetitions_for_duration(line: str, match: re.Match[str]) -> int:
     return min(repeats, 30)
 
 
+def _strength_row_reps_step(cells: list[str], kind: str, order: int) -> dict[str, Any] | None:
+    """Ligne de tableau « Band pull-apart | … | x15 » : x = nombre de répétitions."""
+    start = 1 if re.fullmatch(r"\d{1,3}", cells[0]) else 0
+    name = cells[start]
+    others = [cell for cell in cells[start + 1:] if cell and cell not in {"—", "-"}]
+    for cell in others:
+        match = TABLE_REPS_CELL.match(cell)
+        if not match:
+            continue
+        reps = int(match.group("a") or match.group("b"))
+        tail = match.group("tail").strip(" ;,.—-")
+        description = max((other for other in others if other != cell), key=len, default="")
+        explanation = [text for text in (f"({tail})" if tail else "", description) if text]
+        item = {
+            "reps": reps,
+            "duration": None,
+            "name": name,
+            "reference": None,
+            "explanation": explanation,
+            "per_side": False,
+        }
+        title = "Échauffement" if kind == "warmup" else "Séance"
+        return _exercise_step(item, {"title": title, "notes": ""}, order, kind)
+    return None
+
+
+def _strength_bullet_reps_step(line: str, kind: str, order: int) -> dict[str, Any] | None:
+    """Puce « Push-up x8 » ou « 449 —WRINGING THE TOWEL— x 10 » : x = nombre de répétitions."""
+    parsed = _parse_bullet_exercise(line)
+    if not parsed or parsed.get("reps") is None or parsed.get("per_side"):
+        return None
+    name = parsed["name"]
+    reference = None
+    numbered = re.match(r"^(\d{1,4})\s*[—–-]+\s*(.+?)[\s—–-]*$", name)
+    if numbered:
+        reference, name = numbered.group(1), numbered.group(2).strip()
+    parsed = {**parsed, "name": name, "reference": reference}
+    title = "Échauffement" if kind == "warmup" else "Séance"
+    return _exercise_step(parsed, {"title": title, "notes": ""}, order, kind)
+
+
 def _generic_prompt_steps(
     lines: list[str],
     kind: str = "interval",
     instruction_pattern: re.Pattern[str] | None = None,
+    strength: bool = False,
 ) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
     last_instruction_steps: list[dict[str, Any]] = []
@@ -1087,6 +1142,13 @@ def _generic_prompt_steps(
         if cells:
             if re.fullmatch(r"\d{1,3}", cells[0]):
                 seen_rows.add(cells[0])
+            if strength:
+                reps_step = _strength_row_reps_step(cells, current_kind, order)
+                if reps_step:
+                    steps.append(reps_step)
+                    last_instruction_steps = [reps_step]
+                    order += 1
+                    continue
             row_text, duration, per_side = _table_row_instruction(cells)
             chunks = _split_text_chunks(row_text)
             repeats = 2 if (per_side and duration) else 1
@@ -1098,6 +1160,13 @@ def _generic_prompt_steps(
                 for step in last_instruction_steps:
                     _append_step_explanation(step, line)
                 continue
+            if strength and (list_item or is_instruction):
+                reps_step = _strength_bullet_reps_step(line, current_kind, order)
+                if reps_step:
+                    steps.append(reps_step)
+                    last_instruction_steps = [reps_step]
+                    order += 1
+                    continue
             match = DURATION_TOKEN.search(line)
             duration = _duration_seconds(match) if match else None
             chunks = _split_text_chunks(line)
@@ -1150,6 +1219,7 @@ def _strength_warmup_steps(plan_lines: list[str]) -> list[dict[str, Any]]:
         _warmup_lines(plan_lines),
         kind="warmup",
         instruction_pattern=WARMUP_EXERCISE_LINE,
+        strength=True,
     )
 
 
@@ -1173,7 +1243,7 @@ def _generic_workout(
 ) -> tuple[dict[str, Any], str]:
     page_marker = page_id.replace("-", "").casefold()[:PAGE_MARKER_LENGTH]
     digest = hashlib.sha256(
-        ("structured-workout-v5\n" + title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
+        ("structured-workout-v6\n" + title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
     ).hexdigest()[:HASH_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
     if not steps:
@@ -1193,6 +1263,140 @@ def _generic_workout(
     return workout, marker
 
 
+def _table_columns(cells: list[str]) -> dict[str, int] | None:
+    """Repère les colonnes d'un tableau « Séance » (bloc, exercice, répétitions, récupération)."""
+    names = [normalize_name(cell) for cell in cells]
+    if "exercice" not in names:
+        return None
+    columns: dict[str, int] = {"exercise": names.index("exercice")}
+    for index, name in enumerate(names):
+        if name.startswith(("recup", "repos", "pause")):
+            columns.setdefault("rest", index)
+        elif name.startswith(("bloc", "atelier", "circuit")):
+            columns.setdefault("block", index)
+        elif name.startswith(("serie", "tour", "round")):
+            columns.setdefault("sets", index)
+        elif name.startswith(("rep", "duree", "quantite")):
+            columns.setdefault("quantity", index)
+        elif name == "description":
+            columns.setdefault("description", index)
+    if "quantity" not in columns or not ({"block", "rest", "sets"} & columns.keys()):
+        return None  # tableau d'échauffement ou de matériel : pas une séance en blocs
+    return columns
+
+
+def _parse_table_rest(cell: str) -> tuple[int | None, int | None]:
+    """« 30 s vers (9) ; 1’30 fin de tour » -> (30 s entre exercices, 90 s en fin de tour)."""
+    between: int | None = None
+    end_of_round: int | None = None
+    for part in re.split(r"[;；]", cell):
+        seconds = _parse_rest_seconds(part.strip())
+        if not seconds:
+            continue  # « Enchaîné, fin de tour » : pas de durée
+        if END_OF_ROUND.search(part):
+            end_of_round = seconds
+        else:
+            between = seconds
+    return between, end_of_round
+
+
+def parse_table_sections(lines: list[str]) -> list[dict[str, Any]]:
+    """Séance écrite en tableau : une ligne par exercice, regroupées par bloc (tours)."""
+    sections: list[dict[str, Any]] = []
+    columns: dict[str, int] | None = None
+    current: dict[str, Any] | None = None
+    current_id: str | None = None
+
+    def finish() -> None:
+        nonlocal current
+        if current and current["exercises"]:
+            current["rounds"] = max(1, current["sets"] or 1)
+            current["rest_seconds"] = current.pop("round_rest")
+            sections.append(current)
+        current = None
+
+    for raw_line in lines:
+        line = _clean_plan_line(raw_line)
+        cells = _table_row_cells(line) if line else None
+        if not cells:
+            columns = None  # fin du tableau
+            continue
+        if "exercice" in {normalize_name(cell) for cell in cells}:
+            finish()
+            current_id = None
+            columns = _table_columns(cells)
+            continue
+        if columns is None:
+            continue
+
+        def cell(key: str) -> str:
+            index = columns.get(key) if columns else None
+            return cells[index].strip() if index is not None and index < len(cells) else ""
+
+        name = cell("exercise")
+        if not name:
+            continue
+        block = cell("block")
+        label = BLOCK_LABEL.match(block) if block else None
+        block_id = (
+            label.group("id").casefold() if label else (normalize_name(block) if block else None)
+        )
+        rounds_match = SETS_IN_HEADER.search(block) if block else None
+        sets_cell = cell("sets")
+        sets_value = (
+            int(rounds_match.group(1))
+            if rounds_match
+            else (int(sets_cell) if sets_cell.isdigit() else None)
+        )
+        starts_block = (
+            current is None
+            or "block" not in columns
+            or (block_id is not None and block_id != current_id)
+        )
+        if starts_block:
+            finish()
+            title = BLOCK_ROUNDS_TAIL.sub("", block).strip(" ,;—–-") if block else "Séance"
+            current = {
+                "title": title or "Séance",
+                "sets": sets_value,
+                "round_rest": None,
+                "exercises": [],
+                "notes": "",
+                "table": True,
+            }
+            current_id = block_id
+        elif current is not None and current["sets"] is None:
+            current["sets"] = sets_value
+
+        quantity = cell("quantity")
+        reps_match = TABLE_REPS_CELL.match(quantity) if quantity else None
+        pure = _pure_duration_cell(quantity) if quantity and not reps_match else None
+        explanation: list[str] = []
+        if reps_match:
+            tail = reps_match.group("tail").strip(" ;,.—-")
+            if tail:
+                explanation.append(f"({tail})")
+        description = cell("description")
+        if description:
+            explanation.append(description)
+        between, end_of_round = _parse_table_rest(cell("rest"))
+        if current is not None:
+            if end_of_round:
+                current["round_rest"] = end_of_round
+            current["exercises"].append({
+                "reps": int(reps_match.group("a") or reps_match.group("b")) if reps_match else None,
+                "duration": pure[0] if pure else None,
+                "name": name,
+                "reference": None,
+                "explanation": explanation,
+                "per_side": bool(pure and pure[1]),
+                "rest_after": between,
+                "quantity_text": quantity,
+            })
+    finish()
+    return sections
+
+
 def build_garmin_workout(
     title: str,
     page_id: str,
@@ -1209,7 +1413,7 @@ def build_garmin_workout(
     plan_lines = _training_lines(lines)
 
     if sport_key == "strength_training":
-        sections = parse_sections(plan_lines)
+        sections = parse_sections(plan_lines) or parse_table_sections(plan_lines)
         if sections:
             warmup_steps = _strength_warmup_steps(plan_lines) if include_warmup else []
             return _build_strength_workout(
@@ -1219,7 +1423,7 @@ def build_garmin_workout(
                 discipline_text + "\n" + source_text,
                 warmup_steps,
             )
-        steps = _generic_prompt_steps(plan_lines)
+        steps = _generic_prompt_steps(plan_lines, strength=True)
         return _generic_workout(
             title, page_id, discipline_text, source_text, sport_type, steps
         )
@@ -1294,7 +1498,8 @@ def _expanded_exercises(section: dict[str, Any]) -> list[dict[str, Any]]:
     for item in section["exercises"]:
         if item.get("per_side"):
             for label in ("côté 1/2", "côté 2/2"):
-                expanded.append({**item, "side": label})
+                pause = item.get("rest_after") if label == "côté 2/2" else None
+                expanded.append({**item, "side": label, "rest_after": pause})
         else:
             expanded.append(item)
     return expanded
@@ -1304,13 +1509,14 @@ def _exercise_step(
     item: dict[str, Any],
     section: dict[str, Any],
     step_order: int,
+    kind: str = "interval",
 ) -> dict[str, Any]:
     category, exercise_name, exact_match = _resolve_exercise(item["name"])
     reference = f" · Réf. {item['reference']}" if item.get("reference") else ""
     explanation = " — " + " ".join(item.get("explanation", [])) if item.get("explanation") else ""
     note = f" · {section['notes']}" if section.get("notes") else ""
     emom = " · EMOM : un tour au début de chaque minute" if "emom" in section["title"].casefold() else ""
-    match_note = "" if exact_match else " · nom d'exercice Garmin générique"
+    match_note = "" if exact_match or kind == "warmup" else " · nom d'exercice Garmin générique"
     side = f" · {item['side']}" if item.get("side") else ""
     duration = item.get("duration")
     if duration:
@@ -1322,7 +1528,7 @@ def _exercise_step(
             "displayable": True,
         }
         end_value = float(duration)
-    else:
+    elif item.get("reps") is not None:
         exercise_instruction = f"{item['reps']} x {item['name']}{reference}"
         end_condition = {
             "conditionTypeId": 10,
@@ -1331,19 +1537,25 @@ def _exercise_step(
             "displayable": True,
         }
         end_value = float(item["reps"])
+    else:
+        # Quantité non chiffrable (« 8–12 », « max ») : l'étape se termine au bouton Lap.
+        quantity_text = item.get("quantity_text", "")
+        exercise_instruction = f"{item['name']} · {quantity_text}".rstrip(" ·")
+        end_condition = {
+            "conditionTypeId": 1,
+            "conditionTypeKey": "lap.button",
+            "displayOrder": 1,
+            "displayable": True,
+        }
+        end_value = None
     description = (
         f"{section['title']} · {exercise_instruction}{side}{explanation}{note}{emom}{match_note}"
     )
-    return {
+    step = {
         "type": "ExecutableStepDTO",
         "stepOrder": step_order,
-        "stepType": {
-            "stepTypeId": 3,
-            "stepTypeKey": "interval",
-            "displayOrder": 3,
-        },
+        "stepType": _step_type(kind),
         "endCondition": end_condition,
-        "endConditionValue": end_value,
         "targetType": {
             "workoutTargetTypeId": 1,
             "workoutTargetTypeKey": "no.target",
@@ -1353,12 +1565,16 @@ def _exercise_step(
         "exerciseName": exercise_name,
         "description": description[:200],
     }
+    if end_value is not None:
+        step["endConditionValue"] = end_value
+    return step
 
 
-def _rest_step(seconds: int, step_order: int) -> dict[str, Any]:
+def _rest_step(seconds: int, step_order: int, description: str = "Récupération") -> dict[str, Any]:
     return {
         "type": "ExecutableStepDTO",
         "stepOrder": step_order,
+        "description": description,
         "stepType": {"stepTypeId": 5, "stepTypeKey": "rest", "displayOrder": 5},
         "endCondition": {
             "conditionTypeId": 2,
@@ -1398,6 +1614,17 @@ def _repeat_group(
     }
 
 
+def _renumber_steps(steps: list[dict[str, Any]], start: int = 1) -> int:
+    """Numérotation continue (groupe puis ses étapes), comme Garmin l'enregistre."""
+    order = start
+    for step in steps:
+        step["stepOrder"] = order
+        order += 1
+        if step.get("type") == "RepeatGroupDTO":
+            order = _renumber_steps(step.get("workoutSteps", []), order)
+    return order
+
+
 def _build_strength_workout(
     title: str,
     page_id: str,
@@ -1406,36 +1633,35 @@ def _build_strength_workout(
     warmup_steps: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], str]:
     compact_page_id = page_id.replace("-", "").casefold()
-    digest = hashlib.sha256(("structured-workout-v5\n" + title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
+    digest = hashlib.sha256(("structured-workout-v6\n" + title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
     page_marker = compact_page_id[:PAGE_MARKER_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
     workout_name = f"{title[:48].rstrip()} {marker}"[:100]
 
     steps: list[dict[str, Any]] = list(warmup_steps or [])
-    step_order = len(steps) + 1
-    for section in sections:
+    for index, section in enumerate(sections):
         rounds = section["rounds"]
         exercises = _expanded_exercises(section)
-        child_steps = [
-            _exercise_step(item, section, step_order + index + 1)
-            for index, item in enumerate(exercises)
-        ]
-        has_rest = section.get("rest_seconds") is not None and section["rest_seconds"] > 0
-        if has_rest and rounds > 1:
-            child_steps.append(
-                _rest_step(section["rest_seconds"], step_order + len(child_steps) + 1)
-            )
-
+        children: list[dict[str, Any]] = []
+        for position, item in enumerate(exercises):
+            children.append(_exercise_step(item, section, 0))
+            pause = item.get("rest_after")
+            if pause and position < len(exercises) - 1:
+                children.append(_rest_step(int(pause), 0, "Récupération entre exercices"))
+        end_rest = section.get("rest_seconds") or 0
+        # Tableau : la dernière ligne d'un bloc peut porter seule la récup de fin de tour.
+        is_table = bool(section.get("table"))
+        if is_table and not end_rest and exercises and exercises[-1].get("rest_after"):
+            end_rest = int(exercises[-1]["rest_after"])
+        needs_end_rest = rounds > 1 or (is_table and index < len(sections) - 1)
+        if end_rest and needs_end_rest:
+            children.append(_rest_step(int(end_rest), 0))
         if rounds > 1:
-            steps.append(
-                _repeat_group(rounds, child_steps, step_order, skip_last_rest=has_rest)
-            )
-            step_order += len(child_steps) + 2
+            steps.append(_repeat_group(rounds, children, 0, skip_last_rest=bool(end_rest)))
         else:
-            for item in exercises:
-                steps.append(_exercise_step(item, section, step_order))
-                step_order += 1
+            steps.extend(children)
 
+    _renumber_steps(steps)
     if not steps:
         raise ValueError("Aucune étape d'exercice Garmin n'a pu être créée.")
 
