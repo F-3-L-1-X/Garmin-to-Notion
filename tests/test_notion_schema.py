@@ -5,8 +5,6 @@ from datetime import date
 import pytest
 
 from src.notion_schema import (
-    DatabaseSchema,
-    PropertySchema,
     SchemaError,
     create_session_page,
     generate_session_page_properties,
@@ -14,6 +12,7 @@ from src.notion_schema import (
     retrieve_database_schemas,
     validate_session_properties,
 )
+from src.session_generator import generate_and_create_session
 
 
 DATABASE = {
@@ -44,8 +43,10 @@ class FakeNotion:
         self.pages = self
         self._databases = databases
         self.created = []
+        self.retrieved = []
 
     def retrieve(self, database_id):
+        self.retrieved.append(database_id)
         if database_id not in self._databases:
             raise RuntimeError("base inconnue")
         return self._databases[database_id]
@@ -55,7 +56,7 @@ class FakeNotion:
         return kwargs
 
 
-def test_parse_database_metadata_preserves_ids_options_and_formula():
+def test_parse_database_metadata_preserves_ids_options_formula_and_relation():
     schema = parse_database_metadata("db-1", DATABASE)
     assert schema.id == "db-1"
     assert schema.properties["Nom"].id == "title-id"
@@ -94,9 +95,7 @@ def test_invalid_select_option_is_refused():
 def test_valid_session_generation_and_relation():
     schema = parse_database_metadata("db-1", DATABASE)
     properties = generate_session_page_properties(
-        schema,
-        "Nom",
-        "Séance yoga",
+        schema, "Nom", "Séance yoga",
         {"Discipline": ["Yoga"], "Terminé": False, "Date": date(2026, 11, 24), "Programme": ["prog-1"]},
     )
     assert properties["title-id"] == {"title": [{"text": {"content": "Séance yoga"}}]}
@@ -123,3 +122,21 @@ def test_unwritable_formula_is_refused():
     schema = parse_database_metadata("db-1", DATABASE)
     with pytest.raises(SchemaError, match="non créable"):
         validate_session_properties(schema, {"Nom": "Séance", "Charge": 4})
+
+
+def test_generator_refreshes_schema_before_write():
+    fake = FakeNotion({"db-1": DATABASE})
+    result = generate_and_create_session(
+        fake, "db-1", "Nom", "Séance fraîche",
+        {"Discipline": ["Yoga"]},
+    )
+    assert fake.retrieved == ["db-1"]
+    assert len(fake.created) == 1
+    assert result["properties"]["title-id"]["title"][0]["text"]["content"] == "Séance fraîche"
+
+
+def test_generator_refuses_invalid_values_without_calling_writer():
+    fake = FakeNotion({"db-1": DATABASE})
+    with pytest.raises(SchemaError, match="Option invalide"):
+        generate_and_create_session(fake, "db-1", "Nom", "Mauvaise séance", {"Discipline": ["Natation"]})
+    assert fake.created == []
