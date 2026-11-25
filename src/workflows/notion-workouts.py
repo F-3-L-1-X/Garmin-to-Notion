@@ -191,10 +191,12 @@ def _text_from_block(block: dict[str, Any]) -> str:
         return "".join(run.get("plain_text", "") for run in runs)
     cells = body.get("cells")
     if cells:
-        return " | ".join(
-            "".join(run.get("plain_text", "") for run in cell)
-            for cell in cells
-        )
+        texts = []
+        for cell in cells:
+            text = "".join(run.get("plain_text", "") for run in cell)
+            text = re.sub(r"\s*\n\s*", " ", text).replace(" | ", " / ").strip()
+            texts.append(text or "—")  # une cellule vide garde sa place dans la ligne
+        return " | ".join(texts)
     return ""
 
 
@@ -1227,7 +1229,12 @@ def _estimated_seconds(steps: list[dict[str, Any]]) -> int:
     total = 0
     for step in steps:
         if step.get("type") == "RepeatGroupDTO":
-            total += _estimated_seconds(step.get("workoutSteps", [])) * int(step.get("numberOfIterations", 1))
+            children = step.get("workoutSteps", [])
+            total += _estimated_seconds(children) * int(step.get("numberOfIterations", 1))
+            if step.get("skipLastRestStep") and children:
+                last = children[-1]  # la dernière récupération du dernier tour est sautée
+                if last.get("stepType", {}).get("stepTypeKey") in {"rest", "recovery"}:
+                    total -= _estimated_seconds([last])
         elif step.get("endCondition", {}).get("conditionTypeKey") == "time":
             total += int(step.get("endConditionValue") or 0)
     return total
@@ -1243,7 +1250,7 @@ def _generic_workout(
 ) -> tuple[dict[str, Any], str]:
     page_marker = page_id.replace("-", "").casefold()[:PAGE_MARKER_LENGTH]
     digest = hashlib.sha256(
-        ("structured-workout-v6\n" + title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
+        ("structured-workout-v7\n" + title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
     ).hexdigest()[:HASH_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
     if not steps:
@@ -1331,7 +1338,8 @@ def parse_table_sections(lines: list[str]) -> list[dict[str, Any]]:
 
         def cell(key: str) -> str:
             index = columns.get(key) if columns else None
-            return cells[index].strip() if index is not None and index < len(cells) else ""
+            value = cells[index].strip() if index is not None and index < len(cells) else ""
+            return "" if value in {"—", "-", "–"} else value
 
         name = cell("exercise")
         if not name:
@@ -1397,6 +1405,337 @@ def parse_table_sections(lines: list[str]) -> list[dict[str, Any]]:
     return sections
 
 
+# ---------------------------------------------------------------------------
+# Séances écrites en tableaux (vélo, course, natation, yoga…)
+# ---------------------------------------------------------------------------
+PER_SIDE = re.compile(
+    r"(?:\bpar|\bchaque|\bde\s+chaque)\s+(?:côté|cote|jambe|bras|main|pied|épaule|epaule)\b"
+    r"|/\s*(?:côté|cote|jambe|bras)",
+    re.IGNORECASE,
+)
+LEADING_ROUNDS = re.compile(r"^\s*(\d+)\s*[x×]\s*(?=\d)")
+ROUNDS_OF = re.compile(r"\b[x×]\s*(\d+)\s+de\s+", re.IGNORECASE)
+TRAILING_ROUNDS = re.compile(r"[,;]\s*[x×]\s*(\d+)\s*$", re.IGNORECASE)
+LEADING_REPS = re.compile(r"^\s*[x×]\s*(\d+)\b", re.IGNORECASE)
+LABEL_ROUNDS = re.compile(r"\(\s*[x×]\s*(\d+)\s*\)", re.IGNORECASE)
+LABEL_SPLIT = re.compile(r"\((\d+)\s*[x×]\s*(\d+)\s*m\)", re.IGNORECASE)
+DISTANCE_TOKEN = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(km|mètres?|metres?|m)(?![A-Za-zÀ-ÿ])", re.IGNORECASE
+)
+RECOVERY_WORD = re.compile(r"r(?:é|e)cup|repos", re.IGNORECASE)
+COOLDOWN_LABEL = re.compile(r"retour au calme|transition|cooldown|cool-down", re.IGNORECASE)
+
+
+def _plan_table_columns(cells: list[str]) -> dict[str, int] | None:
+    """Repère le rôle de chaque colonne d'un tableau de séance (exercice, durée, récupération…)."""
+    names = [normalize_name(cell) for cell in cells]
+    roles: dict[str, int] = {}
+    for index, name in enumerate(names):
+        if not name:
+            continue
+        if name.startswith(("recup", "repos", "pause", "enchainement")):
+            roles.setdefault("recovery", index)
+        elif name.startswith(("duree", "volume", "rep", "quantite", "distance")):
+            roles.setdefault("quantity", index)
+        elif name.startswith(("cible", "intensite", "allure")):
+            roles.setdefault("target", index)
+        elif name == "description":
+            roles.setdefault("description", index)
+        elif name.startswith("materiel"):
+            roles.setdefault("material", index)
+        elif name == "contenu":
+            roles.setdefault("content", index)
+        elif name.startswith("bloc"):
+            roles.setdefault("block", index)
+        elif name in {"exercice", "posture", "etape"}:
+            roles.setdefault("label", index)
+    if "quantity" not in roles or not ({"label", "block"} & roles.keys()):
+        return None
+    return roles
+
+
+def _plan_table_rows(plan_lines: list[str]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    columns: dict[str, int] | None = None
+    kind = "interval"
+    for raw_line in plan_lines:
+        line = _clean_plan_line(raw_line)
+        if not line:
+            continue
+        cells = _table_row_cells(line)
+        if cells:
+            if cells[0].strip() == "#":
+                columns = _plan_table_columns(cells)  # ligne d'en-tête
+                continue
+            if columns is None:
+                continue
+
+            def cell(key: str) -> str:
+                index = columns.get(key) if columns else None
+                value = cells[index].strip() if index is not None and index < len(cells) else ""
+                return "" if value in {"—", "-", "–"} else value
+
+            label = cell("label")
+            block = cell("block")
+            if label and block:
+                label = f"{block} · {label}"
+            label = label or block
+            if not label:
+                continue
+            content = cell("content")
+            row_kind = (
+                "cooldown" if COOLDOWN_LABEL.search(f"{label} {content}") else kind
+            )
+            rows.append({
+                "kind": row_kind,
+                "label": label,
+                "content": content,
+                "description": cell("description"),
+                "quantity": cell("quantity"),
+                "target": cell("target"),
+                "recovery": cell("recovery"),
+            })
+            continue
+        columns = None  # fin du tableau
+        heading_kind = _plan_section_kind(line)
+        if heading_kind and not (
+            heading_kind == "interval"
+            and kind == "warmup"
+            and normalize_name(line).startswith("cardio")
+        ):
+            kind = heading_kind
+    return rows
+
+
+def _parse_row_quantity(text: str, label: str) -> dict[str, Any]:
+    """« 3 x 30’’ », « 1’ + 2’ récup, x3 », « 30’’ par côté, 4 séries », « 4 x 50 m (200 m) »…"""
+    work = text.strip()
+    rounds: int | None = None
+    match = SETS_IN_HEADER.search(work)
+    if match:
+        rounds = int(match.group(1))
+        work = (work[:match.start()] + work[match.end():]).strip(" ,;")
+    if rounds is None:
+        match = LEADING_ROUNDS.match(work)
+        if match:
+            rounds = int(match.group(1))
+            work = work[match.end():]
+    if rounds is None:
+        match = ROUNDS_OF.search(work)  # « x2 de 1’ »
+        if match:
+            rounds = int(match.group(1))
+            work = (work[:match.start()] + work[match.end():]).strip(" ,;")
+    if rounds is None:
+        match = TRAILING_ROUNDS.search(work)  # « 1’ + 2’ récup, x3 »
+        if match:
+            rounds = int(match.group(1))
+            work = work[:match.start()]
+    reps_match = LEADING_REPS.match(work)  # « x10 chaque sens, 1’ » : répétitions + durée
+    reps = int(reps_match.group(1)) if reps_match else None
+    per_side = bool(PER_SIDE.search(work))
+    work = re.sub(r"\([^)]*\)", "", work)
+
+    segments: list[dict[str, Any]] = []
+    for part in re.split(r"\s*\+\s*", work):
+        recovery = bool(RECOVERY_WORD.search(part))
+        duration = DURATION_TOKEN.search(part)
+        if duration:
+            is_range = bool(RANGE_BEFORE.search(part[:duration.start()]))
+            segments.append({
+                "type": "time",
+                "value": None if is_range else _duration_seconds(duration),
+                "recovery": recovery,
+            })
+            continue
+        distance = DISTANCE_TOKEN.search(part)
+        if distance:
+            amount = float(distance.group(1).replace(",", "."))
+            meters = round(amount * 1000) if distance.group(2).casefold() == "km" else round(amount)
+            segments.append({"type": "distance", "value": max(1, meters), "recovery": recovery})
+
+    if rounds is None:
+        label_split = LABEL_SPLIT.search(label)  # « Brasse facile (2 x 50 m) » + « 100 m »
+        distances = [s for s in segments if s["type"] == "distance"]
+        if label_split and len(segments) == 1 and distances:
+            count, each = int(label_split.group(1)), int(label_split.group(2))
+            if count * each == distances[0]["value"]:
+                rounds = count
+                distances[0]["value"] = each
+    if rounds is None:
+        label_rounds = LABEL_ROUNDS.search(label)  # « Bloc B (x3) »
+        if label_rounds and segments:
+            rounds = int(label_rounds.group(1))
+    return {
+        "rounds": max(1, min(rounds or 1, 30)),
+        "segments": segments,
+        "per_side": per_side,
+        "reps": reps,
+        "text": text.strip(),
+    }
+
+
+def _parse_row_recovery(cell: str) -> tuple[int | None, bool]:
+    """-> (secondes, « entre chaque » ?) ; « 2’ zone 1 entre chaque » = 120 s, sauf après la dernière."""
+    if not cell:
+        return None, False
+    seconds = _parse_rest_seconds(cell)
+    return (seconds or None), bool(re.search(r"\bentre\b", cell, re.IGNORECASE))
+
+
+def _row_description(row: dict[str, str], quantity: dict[str, Any], side: str = "") -> str:
+    text = row["label"]
+    if side:
+        text += f" · {side}"
+    content = row["content"]
+    if content and normalize_name(content) != normalize_name(row["label"]):
+        text += f" · {content}"
+    if quantity["reps"] is not None or not quantity["segments"]:
+        if quantity["text"]:
+            text += f" · {quantity['text']}"
+    if row["target"]:
+        text += f" · {row['target']}"
+    if row["description"]:
+        text += f" — {row['description']}"
+    return text
+
+
+def _plan_work_step(
+    segment: dict[str, Any], description: str, kind: str
+) -> dict[str, Any]:
+    if segment["type"] == "distance" and segment["value"]:
+        return _distance_step(0, int(segment["value"]), description, kind)
+    return _time_or_manual_step(0, description, segment["value"], kind)
+
+
+def _row_steps(
+    row: dict[str, str], sport_key: str, is_last: bool
+) -> list[dict[str, Any]]:
+    kind = row["kind"]
+    recovery_kind = "recovery" if sport_key in {"running", "cycling", "swimming"} else "rest"
+    quantity_text = row["quantity"]
+
+    if REPEAT_TOKEN.search(quantity_text):
+        # « 4 x (1’C / 1’M) » : on réutilise la lecture des séances de course.
+        steps: list[dict[str, Any]] = []
+        for item in _cardio_tokens(quantity_text, sport_key, kind):
+            if "repeat" in item:
+                children = [
+                    _time_or_manual_step(
+                        0, f"{row['label']} · {child['description']}",
+                        child["duration_seconds"], child["kind"],
+                    )
+                    for child in item["steps"]
+                ]
+                steps.append(_repeat_group(max(1, item["repeat"]), children, 0, skip_last_rest=False))
+            else:
+                steps.append(
+                    _time_or_manual_step(
+                        0, f"{row['label']} · {item['description']}",
+                        item["duration_seconds"], item["kind"],
+                    )
+                )
+        if steps:
+            return steps
+
+    quantity = _parse_row_quantity(quantity_text, row["label"])
+    description = _row_description(row, quantity)
+    recovery_seconds, recovery_between = _parse_row_recovery(row["recovery"])
+    segments = quantity["segments"]
+    rounds = quantity["rounds"]
+
+    if not segments:
+        steps = [_time_or_manual_step(0, description, None, kind)]
+        if recovery_seconds and not is_last and not recovery_between:
+            steps.append(_time_or_manual_step(0, f"Récupération — {row['recovery']}", recovery_seconds, recovery_kind))
+        return steps
+
+    work_steps: list[dict[str, Any]] = []
+    has_inner_recovery = False
+    for segment in segments:
+        if segment["recovery"]:
+            has_inner_recovery = True
+            inner = f"Récupération — {row['recovery'] or quantity['text']}"
+            work_steps.append(_plan_work_step(segment, inner, recovery_kind))
+        elif quantity["per_side"] and segment["value"]:
+            for side in ("côté 1/2", "côté 2/2"):
+                side_description = _row_description(row, quantity, side)
+                work_steps.append(_plan_work_step(segment, side_description, kind))
+        else:
+            work_steps.append(_plan_work_step(segment, description, kind))
+
+    if recovery_seconds and not has_inner_recovery:
+        recovery_step = _time_or_manual_step(
+            0, f"Récupération — {row['recovery']}", recovery_seconds, recovery_kind
+        )
+        if rounds > 1:
+            work_steps.append(recovery_step)
+            return [_repeat_group(rounds, work_steps, 0, skip_last_rest=recovery_between)]
+        if not is_last and not recovery_between:
+            work_steps.append(recovery_step)
+        return work_steps
+
+    if rounds > 1:
+        return [_repeat_group(rounds, work_steps, 0, skip_last_rest=has_inner_recovery)]
+    return work_steps
+
+
+def _without_table_headers(lines: list[str]) -> list[str]:
+    kept = []
+    for raw_line in lines:
+        cells = _table_row_cells(_clean_plan_line(raw_line))
+        if cells and cells[0].strip() == "#":
+            continue
+        kept.append(raw_line)
+    return kept
+
+
+def _table_plan_steps(plan_lines: list[str], sport_key: str) -> list[dict[str, Any]]:
+    rows = _plan_table_rows(plan_lines)
+    if not any(row["kind"] in {"interval", "cooldown"} for row in rows):
+        return []  # pas de tableau pour la séance elle-même : lecture par lignes
+    steps: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        steps.extend(_row_steps(row, sport_key, index == len(rows) - 1))
+    _renumber_steps(steps)
+    return steps
+
+
+def _simplified_workout(workout: dict[str, Any]) -> dict[str, Any]:
+    """Dernier recours si Garmin refuse la structure : étapes à plat, toutes de type « actif »."""
+    import copy
+
+    def flatten(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        flat: list[dict[str, Any]] = []
+        for step in steps:
+            if step.get("type") == "RepeatGroupDTO":
+                children = step.get("workoutSteps", [])
+                for turn in range(int(step.get("numberOfIterations", 1))):
+                    last_turn = turn == int(step.get("numberOfIterations", 1)) - 1
+                    for position, child in enumerate(flatten(children)):
+                        is_last_child = position == len(children) - 1
+                        if (
+                            last_turn
+                            and step.get("skipLastRestStep")
+                            and is_last_child
+                            and child.get("stepType", {}).get("stepTypeKey") in {"rest", "recovery"}
+                        ):
+                            continue
+                        flat.append(copy.deepcopy(child))
+            else:
+                clone = copy.deepcopy(step)
+                if clone.get("stepType", {}).get("stepTypeKey") in {"rest", "recovery"}:
+                    clone["stepType"] = _step_type("interval")
+                flat.append(clone)
+        return flat
+
+    simple = copy.deepcopy(workout)
+    for segment in simple.get("workoutSegments", []):
+        steps = flatten(segment.get("workoutSteps", []))
+        _renumber_steps(steps)
+        segment["workoutSteps"] = steps
+    return simple
+
+
 def build_garmin_workout(
     title: str,
     page_id: str,
@@ -1428,6 +1767,13 @@ def build_garmin_workout(
             title, page_id, discipline_text, source_text, sport_type, steps
         )
 
+    table_steps = _table_plan_steps(plan_lines, sport_key)
+    if table_steps:
+        return _generic_workout(
+            title, page_id, discipline_text, source_text, sport_type, table_steps
+        )
+
+    plan_lines = _without_table_headers(plan_lines)
     if sport_key in {"running", "cycling"}:
         ambiguous_bike_repeat = sport_key == "cycling" and any(
             re.search(r"\b(?:repeat|repeter|repete)\b", _fold_text(line))
@@ -1633,7 +1979,7 @@ def _build_strength_workout(
     warmup_steps: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], str]:
     compact_page_id = page_id.replace("-", "").casefold()
-    digest = hashlib.sha256(("structured-workout-v6\n" + title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
+    digest = hashlib.sha256(("structured-workout-v7\n" + title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
     page_marker = compact_page_id[:PAGE_MARKER_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
     workout_name = f"{title[:48].rstrip()} {marker}"[:100]
@@ -1873,18 +2219,30 @@ def sync_page(
     try:
         return _deliver_workout(garmin, title, page["id"], workout, marker, existing_workouts)
     except Exception as error:
-        if not _has_strength_warmup(workout):
-            raise
+        problem = error
+
+    if _has_strength_warmup(workout):
         # Sécurité : si Garmin refuse l'échauffement d'une séance de musculation,
         # on renvoie la séance sans échauffement plutôt que de ne rien envoyer.
         print(
-            f"Garmin a refusé l'échauffement de « {title} » ({error}) : "
+            f"Garmin a refusé l'échauffement de « {title} » ({problem}) : "
             "nouvel essai sans l'échauffement."
         )
-        workout, marker = build_garmin_workout(
-            title, page["id"], disciplines, lines, source_text, include_warmup=False
-        )
-        return _deliver_workout(garmin, title, page["id"], workout, marker, existing_workouts)
+        try:
+            workout, marker = build_garmin_workout(
+                title, page["id"], disciplines, lines, source_text, include_warmup=False
+            )
+            return _deliver_workout(garmin, title, page["id"], workout, marker, existing_workouts)
+        except Exception as error:
+            problem = error
+
+    print(
+        f"Garmin a refusé « {title} » ({problem}) : nouvel essai en version simplifiée "
+        "(étapes à plat, sans groupes de répétitions)."
+    )
+    return _deliver_workout(
+        garmin, title, page["id"], _simplified_workout(workout), marker, existing_workouts
+    )
 
 
 def main() -> None:
