@@ -20,8 +20,10 @@ CHART_COLORS = {
     "heart_rate": "#ef4444",
     "cadence": "#f97316",
     "power": "#8b5cf6",
+    "elevation": "#64748b",
 }
 REPORT_TITLE = "Bilan de la séance"
+REPORT_VERSION = "graphiques v2"  # changer cette valeur régénère les bilans existants
 def _number(value: Any) -> float | None:
     try:
         result = float(value)
@@ -91,19 +93,150 @@ def _series(
 
 
 def _clock(seconds: float) -> str:
-    total = max(0, int(seconds))
-    return f"{total // 60}:{total % 60:02d}"
+    total = max(0, int(round(seconds)))
+    hours, rest = divmod(total, 3600)
+    if hours:
+        return f"{hours}:{rest // 60:02d}:{rest % 60:02d}"
+    return f"{rest // 60}:{rest % 60:02d}"
 
 
 def _format_value(value: float, unit: str, lower_is_better: bool) -> str:
     if lower_is_better:
-        total_seconds = max(0, int(value * 60))
+        total_seconds = max(0, int(round(value * 60)))
         return f"{total_seconds // 60}:{total_seconds % 60:02d}"
-    if unit == "bpm":
+    if unit in ("bpm", "W", "m"):
         return f"{value:.0f}"
-    if unit in ("km/h", "tr/min", "spm"):
-        return f"{value:.1f}"
     return f"{value:.1f}"
+
+
+def _percentile(sorted_values: list[float], fraction: float) -> float:
+    if not sorted_values:
+        return 0.0
+    position = fraction * (len(sorted_values) - 1)
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return sorted_values[lower]
+    weight = position - lower
+    return sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight
+
+
+def _smooth(points: list[tuple[float, float]], window: float) -> list[tuple[float, float]]:
+    """Moyenne glissante centrée sur `window` secondes (Garmin lisse ses courbes)."""
+    if window <= 0 or len(points) < 3:
+        return points
+    half = window / 2
+    result = []
+    left = right = 0
+    running = 0.0
+    count = 0
+    for time_value, _ in points:
+        while right < len(points) and points[right][0] <= time_value + half:
+            running += points[right][1]
+            count += 1
+            right += 1
+        while left < right and points[left][0] < time_value - half:
+            running -= points[left][1]
+            count -= 1
+            left += 1
+        result.append((time_value, running / count if count else points[0][1]))
+    return result
+
+
+def _bucket(points: list[tuple[float, float]], limit: int = 700) -> list[tuple[float, float]]:
+    """Réduit le nombre de points en moyennant (et non en sautant des points : pas de pics perdus ni inventés)."""
+    if len(points) <= limit:
+        return points
+    size = math.ceil(len(points) / limit)
+    reduced = []
+    for start in range(0, len(points), size):
+        chunk = points[start:start + size]
+        reduced.append((
+            sum(item[0] for item in chunk) / len(chunk),
+            sum(item[1] for item in chunk) / len(chunk),
+        ))
+    return reduced
+
+
+def _nice_ticks(
+    low: float,
+    high: float,
+    target: int = 4,
+    candidates: tuple[float, ...] | None = None,
+) -> list[float]:
+    span = max(high - low, 1e-9)
+    raw = span / max(1, target)
+    if candidates:
+        step = next((value for value in candidates if value >= raw), candidates[-1])
+    else:
+        magnitude = 10 ** math.floor(math.log10(raw))
+        step = next(
+            (factor * magnitude for factor in (1, 2, 2.5, 5, 10) if factor * magnitude >= raw),
+            10 * magnitude,
+        )
+    first = math.floor(low / step + 1e-9) * step
+    last = math.ceil(high / step - 1e-9) * step
+    count = int(round((last - first) / step))
+    return [first + index * step for index in range(count + 1)]
+
+
+PACE_STEPS = (5 / 60, 10 / 60, 15 / 60, 30 / 60, 1.0, 2.0, 5.0)
+TIME_STEPS = (30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0, 7200.0)
+
+
+def _axis(
+    points: list[tuple[float, float]],
+    lower_is_better: bool,
+    *,
+    robust: bool = True,
+    floor_zero: bool = False,
+) -> dict[str, Any]:
+    """Échelle verticale lisible : bornes robustes (les pics isolés n'écrasent plus la courbe) et graduations rondes."""
+    values = sorted(value for _, value in points)
+    low, high = values[0], values[-1]
+    if robust and len(values) >= 20:
+        low = _percentile(values, 0.01)
+        high = _percentile(values, 0.99)
+    if high - low < 1e-9:
+        low -= 1.0
+        high += 1.0
+    margin = (high - low) * 0.06
+    low, high = low - margin, high + margin
+    if floor_zero:
+        low = max(0.0, low)
+    ticks = _nice_ticks(low, high, 4, PACE_STEPS if lower_is_better else None)
+    low_tick, high_tick = ticks[0], ticks[-1]
+    if floor_zero and low_tick < 0:
+        low_tick = 0.0
+        ticks = [tick for tick in ticks if tick >= 0] or [0.0, high_tick]
+    start_time = min(time_value for time_value, _ in points)
+    end_time = max(time_value for time_value, _ in points)
+    if end_time <= start_time:
+        end_time = start_time + 1.0
+    if lower_is_better:
+        top_value, bottom_value = low_tick, high_tick
+    else:
+        top_value, bottom_value = high_tick, low_tick
+    if bottom_value == top_value:
+        bottom_value = top_value + 1.0
+    return {
+        "top_value": top_value,
+        "bottom_value": bottom_value,
+        "ticks": ticks,
+        "start_time": start_time,
+        "end_time": end_time,
+    }
+
+
+def _time_ticks(start_time: float, end_time: float) -> list[float]:
+    total = end_time - start_time
+    step = next((value for value in TIME_STEPS if total / value <= 6), TIME_STEPS[-1])
+    ticks = []
+    value = math.ceil(start_time / step) * step
+    while value <= end_time + 1e-6:
+        ticks.append(value)
+        value += step
+    return ticks or [start_time, end_time]
 
 
 def _chart(
@@ -115,6 +248,9 @@ def _chart(
     *,
     lower_is_better: bool = False,
     chart_index: int | None = None,
+    axis: dict[str, Any] | None = None,
+    average: float | None = None,
+    bands: list[tuple[float, float, str]] | None = None,
 ) -> str:
     if not points:
         return ""
@@ -126,33 +262,18 @@ def _chart(
     plot_width = plot_right - plot_left
     plot_height = plot_bottom - plot_top
 
-    values = [value for _, value in points]
-    low = min(values)
-    high = max(values)
-    spread = high - low
-    padding = max(spread * 0.12, abs(high) * 0.04, 1.0)
-    if lower_is_better:
-        top_value, bottom_value = max(0.0, low - padding), high + padding
-    else:
-        top_value, bottom_value = high + padding, max(0.0, low - padding)
-    if bottom_value <= top_value:
-        bottom_value = top_value + 1.0
-
-    start_time = min(time_value for time_value, _ in points)
-    end_time = max(time_value for time_value, _ in points)
-    if end_time <= start_time:
-        end_time = start_time + 1.0
+    axis = axis or _axis(points, lower_is_better)
+    top_value, bottom_value = axis["top_value"], axis["bottom_value"]
+    start_time, end_time = axis["start_time"], axis["end_time"]
 
     def xy(time_value: float, value: float) -> tuple[float, float]:
         x = plot_left + (time_value - start_time) / (end_time - start_time) * plot_width
         ratio = (value - top_value) / (bottom_value - top_value)
+        ratio = max(0.0, min(1.0, ratio))
         return x, plot_top + ratio * plot_height
 
-    step = max(1, math.ceil(len(points) / 650))
-    sampled = points[::step]
-    if sampled[-1] != points[-1]:
-        sampled.append(points[-1])
-    coordinates = [xy(time_value, value) for time_value, value in sampled]
+    drawn = _bucket(points, 650)
+    coordinates = [xy(time_value, value) for time_value, value in drawn]
     path_points = " ".join(
         ("M" if index == 0 else "L") + f" {x:.1f} {point_y:.1f}"
         for index, (x, point_y) in enumerate(coordinates)
@@ -162,7 +283,14 @@ def _chart(
         + " ".join(f"L {x:.1f} {point_y:.1f}" for x, point_y in coordinates)
         + f" L {coordinates[-1][0]:.1f} {plot_bottom:.1f} Z"
     )
-    average = fmean(values)
+    if average is None:
+        # Moyenne pondérée par le temps (et non par le nombre d'échantillons).
+        weighted = 0.0
+        covered = 0.0
+        for (t0, v0), (t1, _) in zip(points, points[1:]):
+            weighted += v0 * (t1 - t0)
+            covered += t1 - t0
+        average = weighted / covered if covered > 0 else fmean(value for _, value in points)
     average_y = xy(start_time, average)[1]
     title_text = escape(title)
     unit_text = escape(unit)
@@ -176,10 +304,21 @@ def _chart(
         f'<text x="34" y="{y + 30}" font-size="20" font-weight="600" fill="#1e293b">{title_text}</text>',
         f'<text x="{WIDTH - 42}" y="{y + 30}" text-anchor="end" font-size="14" fill="#475569">{escape(average_text)}</text>',
     ]
-    for fraction in (0, 0.5, 1):
-        grid_y = plot_top + fraction * plot_height
-        value = top_value + fraction * (bottom_value - top_value)
-        label = _format_value(value, unit, lower_is_better)
+    low_bound, high_bound = sorted((top_value, bottom_value))
+    for band_low, band_high, band_color in bands or []:
+        clipped_low, clipped_high = max(band_low, low_bound), min(band_high, high_bound)
+        if clipped_high <= clipped_low:
+            continue
+        y_a = xy(start_time, clipped_low)[1]
+        y_b = xy(start_time, clipped_high)[1]
+        parts.append(
+            f'<rect x="{plot_left}" y="{min(y_a, y_b):.1f}" width="{plot_width}" height="{abs(y_b - y_a):.1f}" fill="{band_color}" opacity="0.13"/>'
+        )
+    for tick in axis["ticks"]:
+        if tick < low_bound - 1e-9 or tick > high_bound + 1e-9:
+            continue
+        grid_y = xy(start_time, tick)[1]
+        label = _format_value(tick, unit, lower_is_better)
         parts.append(
             f'<line x1="{plot_left}" y1="{grid_y:.1f}" x2="{plot_right}" y2="{grid_y:.1f}" stroke="#e5e7eb" stroke-dasharray="3 5"/>'
         )
@@ -188,14 +327,16 @@ def _chart(
         )
     parts.extend([
         f'<path d="{area_path}" fill="{color}" opacity="0.22"/>',
-        f'<path d="{path_points}" fill="none" stroke="{color}" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>',
+        f'<path d="{path_points}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>',
         f'<line x1="{plot_left}" y1="{average_y:.1f}" x2="{plot_right}" y2="{average_y:.1f}" stroke="{color}" stroke-dasharray="5 5" opacity="0.8"/>',
     ])
-    for fraction in (0, 0.5, 1):
-        x = plot_left + fraction * plot_width
-        label_time = start_time + fraction * (end_time - start_time)
+    for tick_time in _time_ticks(start_time, end_time):
+        x = plot_left + (tick_time - start_time) / (end_time - start_time) * plot_width
         parts.append(
-            f'<text x="{x:.1f}" y="{plot_bottom + 22}" text-anchor="middle" font-size="12" fill="#64748b">{_clock(label_time)}</text>'
+            f'<line x1="{x:.1f}" y1="{plot_bottom}" x2="{x:.1f}" y2="{plot_bottom + 4}" stroke="#94a3b8"/>'
+        )
+        parts.append(
+            f'<text x="{x:.1f}" y="{plot_bottom + 20}" text-anchor="middle" font-size="12" fill="#64748b">{_clock(tick_time - start_time)}</text>'
         )
     if chart_index is not None:
         parts.extend([
@@ -205,6 +346,28 @@ def _chart(
         ])
     parts.append("</g>")
     return "".join(parts)
+
+
+def _zone_bands(zones: Any, unit_max: float) -> list[tuple[float, float, str]]:
+    if isinstance(zones, dict):
+        zones = zones.get("zones") or zones.get("timeInZones") or []
+    if not isinstance(zones, list):
+        return []
+    rows = []
+    for zone in zones:
+        if not isinstance(zone, dict):
+            continue
+        number = _number(zone.get("zoneNumber"))
+        low = _number(zone.get("zoneLowBoundary"))
+        if number is None or low is None:
+            continue
+        rows.append((int(number), low))
+    rows.sort()
+    bands = []
+    for index, (number, low) in enumerate(rows):
+        high = rows[index + 1][1] if index + 1 < len(rows) else max(unit_max, low + 1)
+        bands.append((low, high, ZONE_COLORS[(number - 1) % len(ZONE_COLORS)]))
+    return bands
 
 
 def _run_walk_chart(
@@ -341,32 +504,57 @@ def render_activity_report(
     times = _sample_times(samples, duration)
     charts = []
 
-    speed = _series(samples, times, ("directSpeed", "speed"), positive_only=True)
     is_running = discipline == "Course à pied"
+    shows_pace = discipline in ("Course à pied", "Marche / Rando")
+    charts: list[dict[str, Any]] = []
+
+    def add_chart(title, points, unit, color, lower, *, smooth=0.0, average=None, robust=True, floor_zero=False, bands=None):
+        points = _smooth(points, smooth)
+        if len(points) < 2:
+            return
+        charts.append({
+            "title": title, "points": points, "unit": unit, "color": color,
+            "lower": lower, "average": average, "robust": robust,
+            "floor_zero": floor_zero, "bands": bands,
+        })
+
+    avg_speed = _number(activity.get("averageSpeed"))
+    speed = _series(samples, times, ("directSpeed", "speed"), positive_only=True)
     if speed:
-        if is_running:
+        if shows_pace:
             pace_points = [
                 (time_value, 16.6666667 / value)
                 for time_value, value in speed
-                if value > 0
+                if value >= 0.5  # en dessous (< 1,8 km/h) : arrêt, pas une allure
             ]
-            charts.append(("Allure", pace_points, "min/km", CHART_COLORS["speed"], True))
+            add_chart(
+                "Allure", pace_points, "min/km", CHART_COLORS["speed"], True,
+                smooth=10.0,
+                average=(16.6666667 / avg_speed) if avg_speed and avg_speed >= 0.5 else None,
+            )
         else:
             speed_points = [(time_value, value * 3.6) for time_value, value in speed]
-            charts.append(("Vitesse", speed_points, "km/h", CHART_COLORS["speed"], False))
+            add_chart(
+                "Vitesse", speed_points, "km/h", CHART_COLORS["speed"], False,
+                smooth=5.0, average=avg_speed * 3.6 if avg_speed else None, floor_zero=True,
+            )
 
-    heart_rate = _series(
-        samples,
-        times,
-        ("directHeartRate", "heartRate"),
-        positive_only=True,
-    )
+    heart_rate = _series(samples, times, ("directHeartRate", "heartRate"), positive_only=True)
     if heart_rate:
-        charts.append(("Fréquence cardiaque", heart_rate, "bpm", CHART_COLORS["heart_rate"], False))
+        max_hr = _number(activity.get("maxHR")) or max(value for _, value in heart_rate)
+        add_chart(
+            "Fréquence cardiaque", heart_rate, "bpm", CHART_COLORS["heart_rate"], False,
+            average=_number(activity.get("averageHR")),
+            bands=_zone_bands(hr_zones, max(max_hr, 1) + 30),
+        )
 
     power = _series(samples, times, ("directPower", "power"), positive_only=True)
     if power:
-        charts.append(("Puissance", power, "W", CHART_COLORS["power"], False))
+        add_chart(
+            "Puissance", power, "W", CHART_COLORS["power"], False,
+            smooth=5.0, average=_number(activity.get("avgPower")), floor_zero=True,
+            bands=_zone_bands(power_zones, max(value for _, value in power) + 50),
+        )
 
     cadence_keys = (
         ("directBikeCadence", "directCadence", "bikeCadence")
@@ -377,46 +565,45 @@ def render_activity_report(
     if cadence:
         cadence_title = "Cadence vélo" if discipline == "Vélo" else "Cadence de course"
         cadence_unit = "tr/min" if discipline == "Vélo" else "spm"
-        charts.append((cadence_title, cadence, cadence_unit, CHART_COLORS["cadence"], False))
+        average_cadence = _number(
+            activity.get("averageBikingCadenceInRevPerMinute")
+            if discipline == "Vélo"
+            else activity.get("averageRunningCadenceInStepsPerMinute")
+        )
+        add_chart(
+            cadence_title, cadence, cadence_unit, CHART_COLORS["cadence"], False,
+            smooth=5.0, average=average_cadence, floor_zero=True,
+        )
+
+    if discipline in ("Course à pied", "Marche / Rando", "Vélo"):
+        elevation = _series(samples, times, ("directElevation", "elevation"))
+        if elevation and max(v for _, v in elevation) - min(v for _, v in elevation) >= 3:
+            add_chart(
+                "Altitude", elevation, "m", CHART_COLORS["elevation"], False,
+                smooth=5.0, robust=False,
+            )
 
     report_height = 28
     chart_markup = []
     chart_data = []
-    for chart_index, (title, points, unit, color, lower_is_better) in enumerate(charts):
+    for chart_index, chart in enumerate(charts):
+        axis = _axis(chart["points"], chart["lower"], robust=chart["robust"], floor_zero=chart["floor_zero"])
         chart_markup.append(
             _chart(
-                title,
-                points,
-                unit,
-                color,
-                report_height,
-                lower_is_better=lower_is_better,
-                chart_index=chart_index,
+                chart["title"], chart["points"], chart["unit"], chart["color"], report_height,
+                lower_is_better=chart["lower"], chart_index=chart_index,
+                axis=axis, average=chart["average"], bands=chart["bands"],
             )
         )
-        values = [value for _, value in points]
-        low, high = min(values), max(values)
-        spread = high - low
-        padding = max(spread * 0.12, abs(high) * 0.04, 1.0)
-        if lower_is_better:
-            top_value, bottom_value = max(0.0, low - padding), high + padding
-        else:
-            top_value, bottom_value = high + padding, max(0.0, low - padding)
-        if bottom_value <= top_value:
-            bottom_value = top_value + 1.0
-        start_time = min(time_value for time_value, _ in points)
-        end_time = max(time_value for time_value, _ in points)
-        if end_time <= start_time:
-            end_time = start_time + 1.0
         chart_data.append({
-            "title": title,
-            "unit": unit,
-            "lower_is_better": lower_is_better,
-            "points": points,
-            "start_time": start_time,
-            "end_time": end_time,
-            "top_value": top_value,
-            "bottom_value": bottom_value,
+            "title": chart["title"],
+            "unit": chart["unit"],
+            "lower_is_better": chart["lower"],
+            "points": [[round(t, 1), round(v, 3)] for t, v in _bucket(chart["points"], 900)],
+            "start_time": axis["start_time"],
+            "end_time": axis["end_time"],
+            "top_value": axis["top_value"],
+            "bottom_value": axis["bottom_value"],
             "plot_left": 88,
             "plot_right": WIDTH - 34,
             "plot_top": report_height + 50,
@@ -514,7 +701,7 @@ function valueLabel(value, chart) {
     const total = Math.max(0, Math.round(value * 60));
     return Math.floor(total / 60) + ":" + String(total % 60).padStart(2, "0");
   }
-  return chart.unit === "bpm" ? String(Math.round(value)) : Number(value).toFixed(1);
+  return ["bpm", "W", "m"].includes(chart.unit) ? String(Math.round(value)) : Number(value).toFixed(1);
 }
 document.querySelectorAll(".chart-hit-area").forEach(function(overlay) {
   const group = overlay.closest("[data-chart-index]");
@@ -542,7 +729,7 @@ document.querySelectorAll(".chart-hit-area").forEach(function(overlay) {
     const index = Math.abs(chart.points[leftIndex][0] - target) <= Math.abs(chart.points[rightIndex][0] - target) ? leftIndex : rightIndex;
     const point = chart.points[index];
     const x = chart.plot_left + (point[0] - chart.start_time) / (chart.end_time - chart.start_time) * (chart.plot_right - chart.plot_left);
-    const yRatio = (point[1] - chart.top_value) / (chart.bottom_value - chart.top_value);
+    const yRatio = Math.max(0, Math.min(1, (point[1] - chart.top_value) / (chart.bottom_value - chart.top_value)));
     const y = chart.plot_top + yRatio * (chart.plot_bottom - chart.plot_top);
     cursor.setAttribute("x1", x);
     cursor.setAttribute("x2", x);
@@ -761,10 +948,14 @@ def _choose_report_container(
     )
 
 
-def _has_private_report_marker(children: list[dict], activity_id: str) -> bool:
+def _has_private_report_marker(
+    children: list[dict], activity_id: str, require_version: bool = False
+) -> bool:
     marker = _report_marker(activity_id)
     for index, child in enumerate(children[:-1]):
         if child.get("type") != "paragraph" or marker not in _block_text(child):
+            continue
+        if require_version and REPORT_VERSION not in _block_text(child):
             continue
         next_child = children[index + 1]
         if next_child.get("type") != "embed":
@@ -791,6 +982,7 @@ def page_has_interactive_report(
     return _has_private_report_marker(
         _report_container_children(notion, page_id),
         activity_id,
+        require_version=True,
     )
 
 
@@ -868,7 +1060,7 @@ def add_or_update_activity_report(
             notion.blocks.delete(block_id=child_id)
 
     marker = _report_marker(activity_id)
-    label = f"Bilan Garmin — {activity_name[:120]} · "
+    label = f"Bilan Garmin — {activity_name[:120]} · {REPORT_VERSION} · "
     notion.blocks.children.append(
         block_id=container_id,
         children=[

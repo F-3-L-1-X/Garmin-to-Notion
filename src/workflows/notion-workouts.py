@@ -49,12 +49,14 @@ DISCIPLINE_SPORTS = {
     "cardio": "cardio_training",
     "pilates": "pilates",
     "hiit": "hiit",
+    "massage": "other",
     "gymnastique": "other",
     "escalade": "other",
+    "aikido": "other",
     "skidefond": "other",
     "marcherando": "other",
 }
-NON_WORKOUT_DISCIPLINES = {"repos", "massage"}
+NON_WORKOUT_DISCIPLINES = {"repos"}
 
 EXERCISE_LINE = re.compile(
     r"^(?P<reps>\d+)\s*[x×]\s*(?P<name>.+?)"
@@ -276,9 +278,10 @@ def sport_for_disciplines(disciplines: list[str]) -> dict[str, Any] | None:
     if any(value in NON_WORKOUT_DISCIPLINES for value in normalized):
         return None
     priority = (
-        "courseapied", "velo", "natation", "yoga", "pilates", "hiit", "cardio",
+        "massage", "courseapied", "velo", "natation", "yoga", "pilates", "hiit", "cardio",
+        "aikido", "escalade", "skidefond", "marcherando",
         "mobilite", "etirement", "renforcement", "hautducorps", "basducorps",
-        "touslecorps", "gymnastique", "escalade", "skidefond", "marcherando",
+        "touslecorps", "gymnastique",
     )
     for discipline in priority:
         if discipline in normalized:
@@ -1250,14 +1253,17 @@ def _generic_workout(
 ) -> tuple[dict[str, Any], str]:
     page_marker = page_id.replace("-", "").casefold()[:PAGE_MARKER_LENGTH]
     digest = hashlib.sha256(
-        ("structured-workout-v7\n" + title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
+        ("structured-workout-v15\n" + title + "\n" + discipline_text + "\n" + source_text).encode("utf-8")
     ).hexdigest()[:HASH_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
     if not steps:
         raise ValueError("Aucune consigne exploitable dans cette séance.")
+    _renumber_steps(steps)
+    if not steps:
+        raise ValueError("Aucune consigne exploitable dans cette séance.")
 
     workout = {
-        "workoutName": f"{title[:48].rstrip()} {marker}"[:100],
+        "workoutName": title.strip()[:100],
         "sportType": dict(sport_type),
         "estimatedDurationInSecs": _estimated_seconds(steps),
         "workoutSegments": [{
@@ -1287,6 +1293,14 @@ def _table_columns(cells: list[str]) -> dict[str, int] | None:
             columns.setdefault("quantity", index)
         elif name == "description":
             columns.setdefault("description", index)
+        elif name.startswith(("poids", "charge")):
+            columns.setdefault("weight", index)
+        elif name.startswith("cible") and "second" in name:
+            columns.setdefault("target2", index)
+        elif name.startswith("cible"):
+            columns.setdefault("target", index)
+        elif name.startswith("materiel"):
+            columns.setdefault("material", index)
     if "quantity" not in columns or not ({"block", "rest", "sets"} & columns.keys()):
         return None  # tableau d'échauffement ou de matériel : pas une séance en blocs
     return columns
@@ -1400,6 +1414,10 @@ def parse_table_sections(lines: list[str]) -> list[dict[str, Any]]:
                 "per_side": bool(pure and pure[1]),
                 "rest_after": between,
                 "quantity_text": quantity,
+                "target": cell("target"),
+                "target2": cell("target2"),
+                "weight": cell("weight"),
+                "material": cell("material"),
             })
     finish()
     return sections
@@ -1437,7 +1455,11 @@ def _plan_table_columns(cells: list[str]) -> dict[str, int] | None:
             roles.setdefault("recovery", index)
         elif name.startswith(("duree", "volume", "rep", "quantite", "distance")):
             roles.setdefault("quantity", index)
-        elif name.startswith(("cible", "intensite", "allure")):
+        elif name.startswith("poids") or name.startswith("charge"):
+            roles.setdefault("weight", index)
+        elif name.startswith("cible") and "second" in name:
+            roles.setdefault("target2", index)
+        elif name.startswith(("cible", "intensite", "allure", "pression")):
             roles.setdefault("target", index)
         elif name == "description":
             roles.setdefault("description", index)
@@ -1447,7 +1469,7 @@ def _plan_table_columns(cells: list[str]) -> dict[str, int] | None:
             roles.setdefault("content", index)
         elif name.startswith("bloc"):
             roles.setdefault("block", index)
-        elif name in {"exercice", "posture", "etape"}:
+        elif name.startswith(("exercice", "posture", "etape", "zone", "mouvement", "geste", "technique", "activite", "voie")):
             roles.setdefault("label", index)
     if "quantity" not in roles or not ({"label", "block"} & roles.keys()):
         return None
@@ -1494,6 +1516,9 @@ def _plan_table_rows(plan_lines: list[str]) -> list[dict[str, str]]:
                 "quantity": cell("quantity"),
                 "target": cell("target"),
                 "recovery": cell("recovery"),
+                "material": cell("material"),
+                "target2": cell("target2"),
+                "weight": cell("weight"),
             })
             continue
         columns = None  # fin du tableau
@@ -1594,6 +1619,12 @@ def _row_description(row: dict[str, str], quantity: dict[str, Any], side: str = 
             text += f" · {quantity['text']}"
     if row["target"]:
         text += f" · {row['target']}"
+    if row.get("target2"):
+        text += f" · Cible secondaire : {row['target2']}"
+    if row.get("weight"):
+        text += f" · Poids : {row['weight']}"
+    if row.get("material"):
+        text += f" · Matériel : {row['material']}"
     if row["description"]:
         text += f" — {row['description']}"
     return text
@@ -1607,8 +1638,82 @@ def _plan_work_step(
     return _time_or_manual_step(0, description, segment["value"], kind)
 
 
+def _parse_weight_kg(text: str) -> float | None:
+    """« 12 kg », « 2 x 8 kg », « 12,5 » -> 12.5 ; « poids du corps », « — » -> None."""
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*(kg|lbs?|livres?)?\b", text or "", re.IGNORECASE)
+    if not match or re.search(r"poids du corps|pdc|bodyweight", text, re.IGNORECASE):
+        return None
+    value = float(match.group(1).replace(",", "."))
+    if match.group(2) and match.group(2).lower().startswith(("lb", "livre")):
+        value *= 0.4536
+    return round(value, 2) if 0 < value <= 500 else None
+
+
+def _garmin_target(text: str) -> dict[str, Any] | None:
+    """Cible lisible par Garmin : zone FC « Z2 », « 130-145 bpm », « 180-220 W », « 85-95 rpm », « 5:30-5:45/km »."""
+    text = (text or "").replace("’", "'")
+    zone = re.search(r"\bz(?:one)?\s*([1-5])\b", text, re.IGNORECASE)
+    rng = r"(\d+(?:[.,]\d+)?)\s*(?:[-–à]|a)\s*(\d+(?:[.,]\d+)?)"
+    for unit, type_id, key in (
+        (r"bpm", 4, "heart.rate.zone"),
+        (r"w(?:atts?)?", 2, "power.zone"),
+        (r"rpm|tr/min", 3, "cadence"),
+    ):
+        match = re.search(rng + r"\s*(?:" + unit + r")\b", text, re.IGNORECASE)
+        if match:
+            low, high = sorted(float(v.replace(",", ".")) for v in match.groups())
+            return {
+                "targetType": {"workoutTargetTypeId": type_id, "workoutTargetTypeKey": key, "displayOrder": type_id},
+                "targetValueOne": low,
+                "targetValueTwo": high,
+            }
+    pace = re.search(
+        r"(\d{1,2})[:'](\d{2})\s*(?:[-–à]\s*(\d{1,2})[:'](\d{2}))?\s*(?:/\s*km|min/km)", text, re.IGNORECASE
+    )
+    if pace:
+        first = int(pace.group(1)) * 60 + int(pace.group(2))
+        second = int(pace.group(3)) * 60 + int(pace.group(4)) if pace.group(3) else first
+        speeds = sorted(1000.0 / value for value in (first, second) if value > 0)
+        if speeds:
+            return {
+                "targetType": {"workoutTargetTypeId": 6, "workoutTargetTypeKey": "pace.zone", "displayOrder": 6},
+                "targetValueOne": round(speeds[0] * 0.98 if len(speeds) == 1 else speeds[0], 3),
+                "targetValueTwo": round(speeds[-1] * 1.02 if len(speeds) == 1 else speeds[-1], 3),
+            }
+    if zone:
+        return {
+            "targetType": {"workoutTargetTypeId": 4, "workoutTargetTypeKey": "heart.rate.zone", "displayOrder": 4},
+            "zoneNumber": int(zone.group(1)),
+        }
+    return None
+
+
+def _apply_garmin_target(steps: list[dict[str, Any]], target: dict[str, Any]) -> None:
+    for step in steps:
+        if step.get("type") == "RepeatGroupDTO":
+            _apply_garmin_target(step.get("workoutSteps", []), target)
+        elif step.get("stepType", {}).get("stepTypeKey") in {"warmup", "cooldown", "interval"}:
+            step.update(copy_target(target))
+
+
+def copy_target(target: dict[str, Any]) -> dict[str, Any]:
+    import copy
+
+    return copy.deepcopy(target)
+
+
 def _row_steps(
-    row: dict[str, str], sport_key: str, is_last: bool
+    row: dict[str, str], sport_key: str, is_last: bool, change_side: bool = False
+) -> list[dict[str, Any]]:
+    steps = _row_steps_core(row, sport_key, is_last, change_side)
+    target = _garmin_target(row.get("target", "")) or _garmin_target(row.get("target2", ""))
+    if target and sport_key in {"running", "cycling", "swimming", "cardio_training", "other"}:
+        _apply_garmin_target(steps, target)
+    return steps
+
+
+def _row_steps_core(
+    row: dict[str, str], sport_key: str, is_last: bool, change_side: bool = False
 ) -> list[dict[str, Any]]:
     kind = row["kind"]
     recovery_kind = "recovery" if sport_key in {"running", "cycling", "swimming"} else "rest"
@@ -1657,9 +1762,17 @@ def _row_steps(
             inner = f"Récupération — {row['recovery'] or quantity['text']}"
             work_steps.append(_plan_work_step(segment, inner, recovery_kind))
         elif quantity["per_side"] and segment["value"]:
-            for side in ("côté 1/2", "côté 2/2"):
+            sides = ("côté gauche", "côté droit") if change_side else ("côté 1/2", "côté 2/2")
+            for position, side in enumerate(sides):
                 side_description = _row_description(row, quantity, side)
                 work_steps.append(_plan_work_step(segment, side_description, kind))
+                if change_side and position == 0:
+                    # Nouveau bloc à chaque changement de côté : l'étape attend le bouton Lap.
+                    work_steps.append(
+                        _time_or_manual_step(
+                            0, f"Changer de côté — {row['label']} : passer au côté droit", None, "rest"
+                        )
+                    )
         else:
             work_steps.append(_plan_work_step(segment, description, kind))
 
@@ -1689,13 +1802,15 @@ def _without_table_headers(lines: list[str]) -> list[str]:
     return kept
 
 
-def _table_plan_steps(plan_lines: list[str], sport_key: str) -> list[dict[str, Any]]:
+def _table_plan_steps(
+    plan_lines: list[str], sport_key: str, change_side: bool = False
+) -> list[dict[str, Any]]:
     rows = _plan_table_rows(plan_lines)
     if not any(row["kind"] in {"interval", "cooldown"} for row in rows):
         return []  # pas de tableau pour la séance elle-même : lecture par lignes
     steps: list[dict[str, Any]] = []
     for index, row in enumerate(rows):
-        steps.extend(_row_steps(row, sport_key, index == len(rows) - 1))
+        steps.extend(_row_steps(row, sport_key, index == len(rows) - 1, change_side))
     _renumber_steps(steps)
     return steps
 
@@ -1731,6 +1846,10 @@ def _simplified_workout(workout: dict[str, Any]) -> dict[str, Any]:
     simple = copy.deepcopy(workout)
     for segment in simple.get("workoutSegments", []):
         steps = flatten(segment.get("workoutSteps", []))
+        for step in steps:
+            for key in ("targetValueOne", "targetValueTwo", "zoneNumber", "weightValue", "weightUnit"):
+                step.pop(key, None)
+            step["targetType"] = {"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target", "displayOrder": 1}
         _renumber_steps(steps)
         segment["workoutSteps"] = steps
     return simple
@@ -1767,7 +1886,8 @@ def build_garmin_workout(
             title, page_id, discipline_text, source_text, sport_type, steps
         )
 
-    table_steps = _table_plan_steps(plan_lines, sport_key)
+    is_massage = "massage" in {normalize_name(value) for value in disciplines}
+    table_steps = _table_plan_steps(plan_lines, sport_key, change_side=is_massage)
     if table_steps:
         return _generic_workout(
             title, page_id, discipline_text, source_text, sport_type, table_steps
@@ -1894,8 +2014,18 @@ def _exercise_step(
             "displayable": True,
         }
         end_value = None
+    extras = ""
+    if item.get("target"):
+        extras += f" · Cible : {item['target']}"
+    if item.get("target2"):
+        extras += f" · Secondaire : {item['target2']}"
+    weight_kg = _parse_weight_kg(item.get("weight", ""))
+    if item.get("weight"):
+        extras += f" · Poids : {item['weight']}"
+    if item.get("material"):
+        extras += f" · Matériel : {item['material']}"
     description = (
-        f"{section['title']} · {exercise_instruction}{side}{explanation}{note}{emom}{match_note}"
+        f"{section['title']} · {exercise_instruction}{side}{extras}{explanation}{note}{emom}{match_note}"
     )
     step = {
         "type": "ExecutableStepDTO",
@@ -1913,6 +2043,9 @@ def _exercise_step(
     }
     if end_value is not None:
         step["endConditionValue"] = end_value
+    if weight_kg is not None:
+        step["weightValue"] = weight_kg
+        step["weightUnit"] = {"unitId": 8, "unitKey": "kilogram", "factor": 1000.0}
     return step
 
 
@@ -1960,8 +2093,26 @@ def _repeat_group(
     }
 
 
+def _prune_steps(steps: list[dict[str, Any]]) -> None:
+    """Aucun bloc vide : groupes sans étape retirés, groupes à 1 tour remplacés par leur contenu."""
+    cleaned: list[dict[str, Any]] = []
+    for step in steps:
+        if step.get("type") == "RepeatGroupDTO":
+            children = step.get("workoutSteps", [])
+            _prune_steps(children)
+            if not children:
+                continue
+            if int(step.get("numberOfIterations", 1)) <= 1:
+                cleaned.extend(children)
+                continue
+        cleaned.append(step)
+    steps[:] = cleaned
+
+
 def _renumber_steps(steps: list[dict[str, Any]], start: int = 1) -> int:
     """Numérotation continue (groupe puis ses étapes), comme Garmin l'enregistre."""
+    if start == 1:
+        _prune_steps(steps)
     order = start
     for step in steps:
         step["stepOrder"] = order
@@ -1979,10 +2130,10 @@ def _build_strength_workout(
     warmup_steps: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], str]:
     compact_page_id = page_id.replace("-", "").casefold()
-    digest = hashlib.sha256(("structured-workout-v7\n" + title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
+    digest = hashlib.sha256(("structured-workout-v15\n" + title + "\n" + source_text).encode("utf-8")).hexdigest()[:HASH_LENGTH]
     page_marker = compact_page_id[:PAGE_MARKER_LENGTH]
     marker = f"[NTN:{page_marker}:{digest}:P]"
-    workout_name = f"{title[:48].rstrip()} {marker}"[:100]
+    workout_name = title.strip()[:100]
 
     steps: list[dict[str, Any]] = list(warmup_steps or [])
     for index, section in enumerate(sections):
@@ -2035,6 +2186,16 @@ def _build_strength_workout(
     return workout, marker
 
 
+def _item_tag(item: dict[str, Any]) -> re.Match[str] | None:
+    """Repère de synchro : dans la note (nouveau) ou à la fin du titre (anciennes séances)."""
+    match = SYNC_TAG.search(str(item.get("description") or "").strip())
+    return match or SYNC_TAG.search(str(item.get("workoutName") or "").strip())
+
+
+def _clean_title(name: str) -> str:
+    return SYNC_TAG.sub("", name).rstrip()
+
+
 def all_garmin_workouts(garmin: Garmin) -> list[dict[str, Any]]:
     workouts: list[dict[str, Any]] = []
     start = 0
@@ -2075,14 +2236,11 @@ def clear_synced_workout_notes(
     existing_workouts: list[dict[str, Any]],
     upcoming_page_markers: set[str],
 ) -> None:
+    """Retire des anciennes séances le code [NTN:…] (titre ou note) : seul le titre Notion reste."""
     for existing in existing_workouts:
-        workout_name = existing.get("workoutName", "")
-        tag = SYNC_TAG.search(workout_name)
-        if (
-            not tag
-            or tag.group(3) == "F"
-            or tag.group(1).casefold() in upcoming_page_markers
-        ):
+        workout_name = str(existing.get("workoutName") or "")
+        tag = _item_tag(existing)
+        if not tag:
             continue
         workout_id = existing.get("workoutId")
         if not workout_id:
@@ -2091,31 +2249,60 @@ def clear_synced_workout_notes(
             workout = garmin.get_workout_by_id(workout_id)
             if not workout:
                 continue
-            description = str(workout.get("description") or "")
-            workout["description"] = ""
             removed_steps = 0
             for segment in workout.get("workoutSegments", []):
                 cleaned_steps, removed = _remove_legacy_text_overflow(
                     segment.get("workoutSteps", [])
                 )
                 segment["workoutSteps"] = cleaned_steps
+                _prune_steps(segment["workoutSteps"])
+                _renumber_steps(segment["workoutSteps"])
                 removed_steps += removed
-            clean_name = (
-                workout_name[:tag.start()]
-                + f"[NTN:{tag.group(1)}:{tag.group(2)}:F]"
-            )
+            clean_name = _clean_title(workout_name)
             workout["workoutName"] = clean_name
+            workout["description"] = ""
             garmin.update_workout(workout_id, workout)
-            if description.strip() or removed_steps:
-                garmin.push_workout_to_device(workout_id=workout_id)
             existing["workoutName"] = clean_name
-            if description.strip() or removed_steps:
-                print(
-                    f"Notes Garmin et texte de débordement supprimés : "
-                    f"« {workout_name} » ({removed_steps} étape(s) retirée(s))."
-                )
+            existing["description"] = ""
+            print(f"Ancien repère retiré du titre/de la note : « {clean_name} ».")
         except Exception as error:
-            print(f"Impossible de vider les notes de « {workout_name} » : {error}")
+            print(f"Impossible de nettoyer « {workout_name} » : {error}")
+
+
+def _signature(workout: dict[str, Any]) -> str:
+    """Résumé comparable d'une séance (étapes, durées, textes) pour savoir si Notion a changé."""
+    import json
+
+    def steps_of(steps: list[dict[str, Any]]) -> list[Any]:
+        out: list[Any] = []
+        for step in steps:
+            if step.get("type") == "RepeatGroupDTO":
+                out.append([
+                    "R", int(step.get("numberOfIterations") or 0), bool(step.get("skipLastRestStep")),
+                    steps_of(step.get("workoutSteps", [])),
+                ])
+            else:
+                out.append([
+                    (step.get("stepType") or {}).get("stepTypeKey"),
+                    (step.get("endCondition") or {}).get("conditionTypeKey"),
+                    round(float(step.get("endConditionValue") or 0), 2),
+                    str(step.get("description") or "").strip(),
+                    step.get("category") or "",
+                    step.get("exerciseName") or "",
+                    (step.get("targetType") or {}).get("workoutTargetTypeKey"),
+                    step.get("targetValueOne"), step.get("targetValueTwo"), step.get("zoneNumber"),
+                    step.get("weightValue"),
+                ])
+        return out
+
+    return json.dumps(
+        [
+            (workout.get("sportType") or {}).get("sportTypeKey"),
+            [steps_of(seg.get("workoutSteps", [])) for seg in workout.get("workoutSegments", [])],
+        ],
+        sort_keys=True,
+        ensure_ascii=False,
+    )
 
 
 def _has_strength_warmup(workout: dict[str, Any]) -> bool:
@@ -2146,11 +2333,13 @@ def _deliver_workout(
     existing_workouts: list[dict[str, Any]],
 ) -> bool:
     page_marker = f"[NTN:{page_id.replace('-', '').casefold()[:PAGE_MARKER_LENGTH]}:"
+    wanted_name = workout["workoutName"]
     existing = next(
         (
             item
             for item in existing_workouts
-            if page_marker in item.get("workoutName", "")
+            if _clean_title(str(item.get("workoutName") or "")).strip() == wanted_name
+            or page_marker in f"{item.get('description') or ''} {item.get('workoutName') or ''}"
         ),
         None,
     )
@@ -2159,38 +2348,35 @@ def _deliver_workout(
         workout_id = existing.get("workoutId")
         if not workout_id:
             raise ValueError(f"Identifiant Garmin absent pour « {title} ».")
-        existing_tag = SYNC_TAG.search(existing.get("workoutName", ""))
-        current_tag = SYNC_TAG.search(workout["workoutName"])
+        try:
+            current = garmin.get_workout_by_id(workout_id)
+        except Exception:
+            current = None
         if (
-            existing_tag
-            and current_tag
-            and existing_tag.group(2) == current_tag.group(2)
-            and existing_tag.group(3) == "S"
+            current
+            and _item_tag(current) is None
+            and str(current.get("workoutName") or "").strip() == wanted_name
+            and _signature(current) == _signature(workout)
         ):
             print(f"Entraînement Garmin déjà à jour : « {title} ».")
             return False
 
         garmin.update_workout(workout_id, workout)
         garmin.push_workout_to_device(workout_id=workout_id)
-        sent_workout = dict(workout)
-        sent_workout["workoutName"] = workout["workoutName"].replace(":P]", ":S]")
-        garmin.update_workout(workout_id, sent_workout)
-        existing["workoutName"] = sent_workout["workoutName"]
-        print(f"Entraînement Garmin mis à jour et envoyé à la montre : « {title} » ({marker}).")
+        existing["workoutName"] = wanted_name
+        existing["description"] = ""
+        print(f"Entraînement Garmin mis à jour et envoyé à la montre : « {title} ».")
         return True
 
     created = garmin.upload_workout(workout)
     workout_id = created.get("workoutId") if isinstance(created, dict) else None
     if not workout_id:
         raise ValueError(f"Garmin n'a pas renvoyé l'identifiant de « {title} ».")
-    record = {"workoutId": workout_id, "workoutName": workout["workoutName"]}
-    existing_workouts.append(record)
+    existing_workouts.append(
+        {"workoutId": workout_id, "workoutName": wanted_name, "description": ""}
+    )
     garmin.push_workout_to_device(workout_id=workout_id)
-    sent_workout = dict(workout)
-    sent_workout["workoutName"] = workout["workoutName"].replace(":P]", ":S]")
-    garmin.update_workout(workout_id, sent_workout)
-    record["workoutName"] = sent_workout["workoutName"]
-    print(f"Entraînement Garmin créé et envoyé à la montre : « {title} » ({marker}).")
+    print(f"Entraînement Garmin créé et envoyé à la montre : « {title} ».")
     return True
 
 
